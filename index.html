@@ -102,6 +102,13 @@
   <script>
         const standardizeDate = (dStr) => {
             if (!dStr) return '';
+            // Pelindung jika GVIZ beri format Date(YYYY,M,D)
+            if (dStr.includes && dStr.includes('Date(')) {
+                let m = dStr.match(/Date\((\d+),\s*(\d+),\s*(\d+)/);
+                if (m) {
+                    return String(m[3]).padStart(2, '0') + '/' + String(parseInt(m[2]) + 1).padStart(2, '0') + '/' + m[1];
+                }
+            }
             if (dStr.includes && dStr.includes('T')) {
                 const d = new Date(dStr);
                 if (!isNaN(d)) {
@@ -140,8 +147,8 @@
                 handler.onDataChanged(data);
                 
                 try {
-                    // Panggil data SPREADSHEET tepat dari format lajur menggunakan GVIZ API
-                    const response = await fetch(GVIZ_URL + '&t=' + Date.now());
+                    // Panggil data SPREADSHEET secara public (viewer)
+                    const response = await fetch(GVIZ_URL + '&_=' + Date.now());
                     if (response.ok) {
                         const text = await response.text();
                         const startIdx = text.indexOf('{');
@@ -162,36 +169,65 @@
                                         cols.forEach((colName, index) => {
                                             if (colName && r.c && r.c[index]) {
                                                 let cell = r.c[index];
-                                                flatRow[colName] = cell.v !== null && cell.v !== undefined ? String(cell.v) : '';
+                                                if (Array.isArray(cell.v)) {
+                                                    flatRow[colName] = cell.v.join(',');
+                                                } else {
+                                                    flatRow[colName] = cell.v !== null && cell.v !== undefined ? String(cell.v) : '';
+                                                }
                                                 if (cell.f) flatRow[colName + '_f'] = String(cell.f);
                                             }
                                         });
+
+                                        // Fallback yang teguh jika google sheet tidak detect label header
+                                        const getCell = (idx) => {
+                                            if (r.c && r.c[idx] && r.c[idx].v !== null && r.c[idx].v !== undefined) {
+                                                if (Array.isArray(r.c[idx].v) && r.c[idx].v.length >= 2) {
+                                                    return String(r.c[idx].v[0]).padStart(2, '0') + ':' + String(r.c[idx].v[1]).padStart(2, '0');
+                                                }
+                                                return String(r.c[idx].v);
+                                            }
+                                            return '';
+                                        };
+                                        const getCellF = (idx) => (r.c && r.c[idx] && r.c[idx].f !== null && r.c[idx].f !== undefined) ? String(r.c[idx].f) : getCell(idx);
                                         
-                                        let ic = String(flatRow['ic'] || flatRow['ktp'] || '').trim();
-                                        if(!ic || ic === '-') return;
+                                        let ic = String(flatRow['ic'] || flatRow['ktp'] || getCell(3)).trim();
+                                        if(!ic || ic === '-' || ic.toLowerCase() === 'ic' || ic.toLowerCase() === 'k/p') return; 
                                         
-                                        let nama = String(flatRow['nama'] || '').trim();
-                                        let jawatanSyif = String(flatRow['jawatansyif'] || flatRow['jawatan'] || flatRow['role'] || '');
-                                        let tarikh = standardizeDate(String(flatRow['tarikh_f'] || flatRow['tarikh'] || '').trim());
+                                        let nama = String(flatRow['nama'] || getCell(2)).trim();
+                                        let jawatanSyif = String(flatRow['jawatansyif'] || flatRow['jawatan'] || flatRow['role'] || getCell(9));
+                                        let tarikh = standardizeDate(String(flatRow['tarikh_f'] || flatRow['tarikh'] || getCellF(4)).trim());
                                         
-                                        let mMasukRaw = String(flatRow['masamasuk_f'] || flatRow['masamasuk'] || '').trim();
-                                        let mKeluarRaw = String(flatRow['masakeluar_f'] || flatRow['masakeluar'] || '').trim();
+                                        let mMasukRaw = String(flatRow['masamasuk_f'] || flatRow['masamasuk'] || getCellF(5)).trim();
+                                        let mKeluarRaw = String(flatRow['masakeluar_f'] || flatRow['masakeluar'] || getCellF(6)).trim();
                                         
                                         const formatTime = (t) => {
                                             if(!t || t === '-' || t === 'null') return '-';
                                             if(t.includes('Date(')) {
-                                                let matches = t.match(/Date\(\d+,\d+,\d+,(\d+),(\d+),\d+\)/);
+                                                let matches = t.match(/Date\(\d+,\s*\d+,\s*\d+,\s*(\d+),\s*(\d+)/);
                                                 if(matches) return String(matches[1]).padStart(2,'0') + ':' + String(matches[2]).padStart(2,'0');
                                             }
                                             if(t.toLowerCase().includes('am') || t.toLowerCase().includes('pm')) {
-                                                let parts = t.split(/[:\s]/);
-                                                let h = parseInt(parts[0]);
-                                                let m = parts[1];
-                                                if (!isNaN(h)) {
-                                                    if(t.toLowerCase().includes('pm') && h < 12) h += 12;
-                                                    if(t.toLowerCase().includes('am') && h === 12) h = 0;
-                                                    return String(h).padStart(2,'0') + ':' + (m || '00');
+                                                let isPm = t.toLowerCase().includes('pm');
+                                                let parts = t.replace(/[^\d:]/g, '').split(':');
+                                                if (parts.length >= 2) {
+                                                    let h = parseInt(parts[0]);
+                                                    let m = parts[1];
+                                                    if (!isNaN(h)) {
+                                                        if(isPm && h < 12) h += 12;
+                                                        if(!isPm && h === 12) h = 0;
+                                                        return String(h).padStart(2,'0') + ':' + (m || '00');
+                                                    }
                                                 }
+                                            }
+                                            if (t.includes(',')) {
+                                                let parts = t.split(',');
+                                                if (parts.length >= 2 && !isNaN(parseInt(parts[0])) && !isNaN(parseInt(parts[1]))) {
+                                                    return String(parts[0]).trim().padStart(2, '0') + ':' + String(parts[1]).trim().padStart(2, '0');
+                                                }
+                                            }
+                                            let finalParts = t.split(':');
+                                            if (finalParts.length >= 2) {
+                                                return String(finalParts[0]).trim().padStart(2, '0') + ':' + String(finalParts[1]).trim().padStart(2, '0');
                                             }
                                             return t.substring(0, 5);
                                         };
@@ -199,9 +235,9 @@
                                         let mMasuk = formatTime(mMasukRaw);
                                         let mKeluar = formatTime(mKeluarRaw);
                                         
-                                        let tindakan = String(flatRow['tindakan'] || '').toLowerCase().trim();
-                                        let catatan = String(flatRow['catatan'] || '').trim();
-                                        let backendId = String(flatRow['backendid'] || Math.random().toString());
+                                        let tindakan = String(flatRow['tindakan'] || getCell(7)).toLowerCase().trim();
+                                        let catatan = String(flatRow['catatan'] || getCell(8)).trim();
+                                        let backendId = String(flatRow['backendid'] || getCell(0) || Math.random().toString());
 
                                         // 1. Daftar User
                                         if (!parsedData.find(p => p.ic === ic && p.type === 'user')) {
@@ -209,7 +245,7 @@
                                             let shift = 'Tidak Berkenaan';
                                             if (jawatanSyif && jawatanSyif !== '-') {
                                                 let parts = jawatanSyif.split('/');
-                                                role = parts[0].trim();
+                                                role = parts[0].trim().toLowerCase();
                                                 if (parts.length > 1) shift = parts.slice(1).join('/').trim();
                                             }
                                             parsedData.push({
@@ -309,8 +345,6 @@
                     if (record.type === 'attendance') {
                         formData.append('tarikh', record.date || '-');
                         
-                        // CARIAN PINTAR: Kekalkan Masa Masuk & Masa Keluar jika ada pada hari yang sama
-                        // Supaya bila Punch Out, sistem turut menghantar Masa Masuk tanpa memadamnya
                         const normRecordDate = standardizeDate(record.date);
                         const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
                         const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
@@ -334,7 +368,6 @@
                         formData.append('masa_keluar', masaKeluar);
                         formData.append('tindakan', finalTindakan);
                         
-                        // Gabungkan semua nota hari ini
                         let allNotes = [];
                         const allToday = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.note && r.note !== '-');
                         allToday.forEach(r => { if (!allNotes.includes(r.note)) allNotes.push(r.note); });
@@ -350,7 +383,6 @@
                         formData.append('catatan', '-');
                     }
 
-                    // Sisipkan raw record string untuk keupayaan memanggil data (sinkronisasi)
                     formData.append('rawData', JSON.stringify(record));
 
                     fetch(SCRIPT_URL, {
@@ -383,7 +415,6 @@
                         if (record.type === 'attendance') {
                             formData.append('tarikh', record.date || '-');
                             
-                            // Kekalkan logik pintar yang sama sewaktu mengemaskini (Edit Punch)
                             const normRecordDate = standardizeDate(record.date);
                             const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
                             const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
@@ -800,12 +831,17 @@
             const year = now.getFullYear();
             const today = `${day}/${month}/${year}`;
             
-            const staff = state.users.filter(u => u.role === 'guru' || u.role === 'akp' || u.role === 'guru besar');
+            const staff = state.users.filter(u => {
+                const r = String(u.role).toLowerCase();
+                return r === 'guru' || r === 'akp' || r === 'guru besar';
+            });
             const totalStaff = staff.length;
             // Kira 'masuk' dan 'bersebab' sebagai hadir, KECUALI jika catatan mengandungi "CUTI BERSALIN". Cuti (th) TIDAK dikira sebagai hadir
             const todayAttendance = state.attendance.filter(r => {
                 const user = state.users.find(u => u.ic === r.ic);
-                if (!user || !(user.role === 'guru' || user.role === 'akp' || user.role === 'guru besar')) return false;
+                if (!user) return false;
+                const ur = String(user.role).toLowerCase();
+                if (!(ur === 'guru' || ur === 'akp' || ur === 'guru besar')) return false;
                 if (standardizeDate(r.date) !== today) return false;
                 
                 if (r.action === 'masuk') return true;
@@ -837,9 +873,9 @@
                 } else if (bersebabRecord) {
                     status = 'HADIR';
                     note = bersebabRecord.note || '';
-                } else if (clockIn) {
+                } else if (clockIn || clockOut) {
                     status = 'HADIR';
-                    note = clockIn.note || clockOut?.note || '';
+                    note = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '';
                 } else {
                     status = 'TIDAK HADIR';
                 }
@@ -1060,9 +1096,9 @@
                 } else if (bersebabRecord) {
                     status = 'Hadir';
                     note = bersebabRecord.note || '';
-                } else if (clockIn) {
-                    status = clockOut ? 'Hadir' : 'Masuk sahaja';
-                    note = clockIn.note || clockOut?.note || '';
+                } else if (clockIn || clockOut) {
+                    status = clockOut && clockIn ? 'Hadir' : 'Masuk sahaja';
+                    note = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '';
                 }
                 
                 dailyRecords[day] = {
@@ -1932,7 +1968,7 @@
                                     ${state.currentUser.name}
                                 </div>
                                 <div style="font-size: ${baseSize * 0.85}px; color: ${currentCardStyle.text}; margin-top: 4px; font-weight: 600; text-transform: uppercase; opacity: 0.8;">
-                                    ${state.currentUser.role} ${state.currentUser.shift !== 'Tidak Berkenaan' ? `• SYIF ${state.currentUser.shift}` : ''}
+                                    ${String(state.currentUser.role).toUpperCase()} ${state.currentUser.shift !== 'Tidak Berkenaan' ? `• SYIF ${state.currentUser.shift}` : ''}
                                 </div>
                             </div>
                             <button 
@@ -2064,12 +2100,17 @@
             const year = now.getFullYear();
             const today = `${day}/${month}/${year}`;
             
-            const staff = state.users.filter(u => u.role === 'guru' || u.role === 'akp' || u.role === 'guru besar');
+            const staff = state.users.filter(u => {
+                const r = String(u.role).toLowerCase();
+                return r === 'guru' || r === 'akp' || r === 'guru besar';
+            });
             const totalStaff = staff.length;
             // Kira 'masuk' dan 'bersebab' sebagai hadir, KECUALI jika catatan mengandungi "CUTI BERSALIN". Cuti (th) TIDAK dikira sebagai hadir
             const todayAttendance = state.attendance.filter(r => {
                 const user = state.users.find(u => u.ic === r.ic);
-                if (!user || !(user.role === 'guru' || user.role === 'akp' || user.role === 'guru besar')) return false;
+                if (!user) return false;
+                const ur = String(user.role).toLowerCase();
+                if (!(ur === 'guru' || ur === 'akp' || ur === 'guru besar')) return false;
                 if (standardizeDate(r.date) !== today) return false;
                 
                 if (r.action === 'masuk') return true;
@@ -2159,7 +2200,7 @@
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                ${staff.filter(u => u.role !== 'pentadbir').sort((a,b) => a.name.localeCompare(b.name)).map(u => {
+                                                ${staff.filter(u => String(u.role).toLowerCase() !== 'pentadbir').sort((a,b) => a.name.localeCompare(b.name)).map(u => {
                                                     return `
                                                     <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.2s;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
                                                         <td style="padding: 16px;">
@@ -2167,7 +2208,7 @@
                                                         </td>
                                                         <td style="padding: 16px; font-size: ${baseSize * 0.85}px; color: ${secondaryColor};">${u.ic}</td>
                                                         <td style="padding: 16px;">
-                                                            <span style="display: inline-block; padding: 6px 12px; background: ${u.role === 'akp' ? '#fef3c7' : '#f3f4f6'}; color: ${u.role === 'akp' ? '#92400e' : '#374151'}; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 700; text-transform: uppercase;">
+                                                            <span style="display: inline-block; padding: 6px 12px; background: ${String(u.role).toLowerCase() === 'akp' ? '#fef3c7' : '#f3f4f6'}; color: ${String(u.role).toLowerCase() === 'akp' ? '#92400e' : '#374151'}; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 700; text-transform: uppercase;">
                                                                 ${u.role}
                                                             </span>
                                                         </td>
@@ -2299,15 +2340,14 @@
                                                     <tr style="border-bottom: 1px solid #f1f5f9; transition: background 0.2s;" onmouseover="this.style.background='#f8fafc'" onmouseout="this.style.background='transparent'">
                                                         <td style="padding: 16px;">
                                                             <div style="font-size: ${baseSize * 0.9}px; color: ${textColor}; font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">${u.name}</div>
-                                                            <div style="font-size: ${baseSize * 0.7}px; color: ${secondaryColor}; font-weight: 600;">${u.ic} • ${u.role.toUpperCase()}</div>
                                                         </td>
                                                         <td style="padding: 16px; text-align: center; font-size: ${baseSize * 0.85}px; color: ${textColor}; font-weight: 700;">
-                                                            ${clockIn ? clockIn.time : '--:--'}
-                                                            <button type="button" onclick="editPunchRecord('${clockIn ? clockIn.__backendId : ''}', 'in', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>
+                                                            ${clockIn && clockIn.time !== '-' ? clockIn.time : '--:--'}
+                                                            <button type="button" onclick="editPunchRecord('${clockIn ? clockIn.__backendId : ''}', 'in', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 4px 8px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.65}px; font-weight: 600; border: none; border-radius: 6px; cursor: pointer;">✏️ Edit</button>
                                                         </td>
                                                         <td style="padding: 16px; text-align: center; font-size: ${baseSize * 0.85}px; color: ${textColor}; font-weight: 700;">
-                                                            ${clockOut ? clockOut.time : '--:--'}
-                                                            <button type="button" onclick="editPunchRecord('${clockOut ? clockOut.__backendId : ''}', 'out', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>
+                                                            ${clockOut && clockOut.time !== '-' ? clockOut.time : '--:--'}
+                                                            <button type="button" onclick="editPunchRecord('${clockOut ? clockOut.__backendId : ''}', 'out', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 4px 8px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.65}px; font-weight: 600; border: none; border-radius: 6px; cursor: pointer;">✏️ Edit</button>
                                                         </td>
                                                         <td style="padding: 16px; text-align: center;">
                                                             ${statusHtml}
@@ -2347,7 +2387,10 @@
         }
 
         function renderReport(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor) {
-            const staffList = state.users.filter(u => u.role === 'guru' || u.role === 'akp' || u.role === 'guru besar');
+            const staffList = state.users.filter(u => {
+                const r = String(u.role).toLowerCase();
+                return r === 'guru' || r === 'akp' || r === 'guru besar';
+            });
             
             if (!state.selectedStaffIc && staffList.length > 0) {
                 state.selectedStaffIc = staffList[0].ic;
@@ -2406,9 +2449,9 @@
                 } else if (bersebabRecord) {
                     status = 'Hadir';
                     note = bersebabRecord.note || '';
-                } else if (clockIn) {
-                    status = clockOut ? 'Hadir' : 'Masuk sahaja';
-                    note = clockIn.note || clockOut?.note || '';
+                } else if (clockIn || clockOut) {
+                    status = clockOut && clockIn ? 'Hadir' : 'Masuk sahaja';
+                    note = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '';
                 }
                 
                 dailyRecords[day] = {
@@ -2570,7 +2613,7 @@
             
             if (user) {
                 state.currentUser = user;
-                state.view = user.role === 'pentadbir' ? 'admin' : 'dashboard';
+                state.view = String(user.role).toLowerCase() === 'pentadbir' ? 'admin' : 'dashboard';
                 notify(`Selamat datang ${user.name}!`, 'success');
                 render();
             } else {
@@ -2970,3 +3013,4 @@
     </script>
 </body>
 </html>
+
