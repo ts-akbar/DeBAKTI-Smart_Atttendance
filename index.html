@@ -100,8 +100,39 @@
  <body class="h-full">
   <div id="app" class="h-full w-full overflow-auto"></div>
   <script>
+        const standardizeDate = (dStr) => {
+            if (!dStr) return '';
+            if (dStr.includes && dStr.includes('T')) {
+                const d = new Date(dStr);
+                if (!isNaN(d)) {
+                    return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear();
+                }
+            }
+            if (typeof dStr === 'string') {
+                let parts = dStr.split(/[-/]/);
+                if (parts.length === 3) {
+                    if (parts[0].length === 4) {
+                        return String(parts[2]).padStart(2, '0') + '/' + String(parts[1]).padStart(2, '0') + '/' + parts[0];
+                    }
+                    let p0 = parseInt(parts[0]);
+                    let p1 = parseInt(parts[1]);
+                    if (isNaN(p0) || isNaN(p1)) return dStr;
+                    
+                    if (p0 > 12) {
+                        return String(p0).padStart(2, '0') + '/' + String(p1).padStart(2, '0') + '/' + parts[2];
+                    } else if (p1 > 12) {
+                        return String(p1).padStart(2, '0') + '/' + String(p0).padStart(2, '0') + '/' + parts[2];
+                    } else {
+                        return String(p0).padStart(2, '0') + '/' + String(p1).padStart(2, '0') + '/' + parts[2];
+                    }
+                }
+            }
+            return dStr;
+        };
+
         // --- SDK MOCK UNTUK SIMPANAN SPREADSHEET & LOCAL ---
         const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwCvJDS5NdSMDZriLW31pgLntJyGUQsAVu950AtfQrvDeKKEVPijMYmvNjcGbWVE7c/exec';
+        const GVIZ_URL = 'https://docs.google.com/spreadsheets/d/1z1SWJqGPxjqNTenqtvHin4i5O3TvYdVGP74dXToKcoY/gviz/tq?tqx=out:json&sheet=Data%20Kehadiran';
 
         window.dataSdk = {
             async init(handler) {
@@ -109,17 +140,154 @@
                 handler.onDataChanged(data);
                 
                 try {
-                    // Penambahan timestamp (?t=...) memastikan pelayar sentiasa menarik data terkini dari Spreadsheet
-                    const response = await fetch(SCRIPT_URL + "?action=read&t=" + new Date().getTime());
+                    // Panggil data SPREADSHEET tepat dari format lajur menggunakan GVIZ API
+                    const response = await fetch(GVIZ_URL + '&t=' + Date.now());
                     if (response.ok) {
-                        const sheetData = await response.json();
-                        if (Array.isArray(sheetData)) {
-                            localStorage.setItem('debakti_data', JSON.stringify(sheetData));
-                            handler.onDataChanged(sheetData);
+                        const text = await response.text();
+                        const startIdx = text.indexOf('{');
+                        const endIdx = text.lastIndexOf('}');
+                        
+                        if (startIdx !== -1 && endIdx !== -1) {
+                            const jsonStr = text.substring(startIdx, endIdx + 1);
+                            
+                            try {
+                                const sheetData = JSON.parse(jsonStr);
+                                let parsedData = [];
+                                
+                                if (sheetData && sheetData.table && sheetData.table.rows) {
+                                    const cols = sheetData.table.cols.map(c => c.label ? c.label.toLowerCase().replace(/[\s_]/g, '') : '');
+                                    
+                                    sheetData.table.rows.forEach(r => {
+                                        let flatRow = {};
+                                        cols.forEach((colName, index) => {
+                                            if (colName && r.c && r.c[index]) {
+                                                let cell = r.c[index];
+                                                flatRow[colName] = cell.v !== null && cell.v !== undefined ? String(cell.v) : '';
+                                                if (cell.f) flatRow[colName + '_f'] = String(cell.f);
+                                            }
+                                        });
+                                        
+                                        let ic = String(flatRow['ic'] || flatRow['ktp'] || '').trim();
+                                        if(!ic || ic === '-') return;
+                                        
+                                        let nama = String(flatRow['nama'] || '').trim();
+                                        let jawatanSyif = String(flatRow['jawatansyif'] || flatRow['jawatan'] || flatRow['role'] || '');
+                                        let tarikh = standardizeDate(String(flatRow['tarikh_f'] || flatRow['tarikh'] || '').trim());
+                                        
+                                        let mMasukRaw = String(flatRow['masamasuk_f'] || flatRow['masamasuk'] || '').trim();
+                                        let mKeluarRaw = String(flatRow['masakeluar_f'] || flatRow['masakeluar'] || '').trim();
+                                        
+                                        const formatTime = (t) => {
+                                            if(!t || t === '-' || t === 'null') return '-';
+                                            if(t.includes('Date(')) {
+                                                let matches = t.match(/Date\(\d+,\d+,\d+,(\d+),(\d+),\d+\)/);
+                                                if(matches) return String(matches[1]).padStart(2,'0') + ':' + String(matches[2]).padStart(2,'0');
+                                            }
+                                            if(t.toLowerCase().includes('am') || t.toLowerCase().includes('pm')) {
+                                                let parts = t.split(/[:\s]/);
+                                                let h = parseInt(parts[0]);
+                                                let m = parts[1];
+                                                if (!isNaN(h)) {
+                                                    if(t.toLowerCase().includes('pm') && h < 12) h += 12;
+                                                    if(t.toLowerCase().includes('am') && h === 12) h = 0;
+                                                    return String(h).padStart(2,'0') + ':' + (m || '00');
+                                                }
+                                            }
+                                            return t.substring(0, 5);
+                                        };
+                                        
+                                        let mMasuk = formatTime(mMasukRaw);
+                                        let mKeluar = formatTime(mKeluarRaw);
+                                        
+                                        let tindakan = String(flatRow['tindakan'] || '').toLowerCase().trim();
+                                        let catatan = String(flatRow['catatan'] || '').trim();
+                                        let backendId = String(flatRow['backendid'] || Math.random().toString());
+
+                                        // 1. Daftar User
+                                        if (!parsedData.find(p => p.ic === ic && p.type === 'user')) {
+                                            let role = 'guru';
+                                            let shift = 'Tidak Berkenaan';
+                                            if (jawatanSyif && jawatanSyif !== '-') {
+                                                let parts = jawatanSyif.split('/');
+                                                role = parts[0].trim();
+                                                if (parts.length > 1) shift = parts.slice(1).join('/').trim();
+                                            }
+                                            parsedData.push({
+                                                __backendId: backendId + '_usr',
+                                                type: 'user',
+                                                name: nama,
+                                                ic: ic,
+                                                role: role,
+                                                shift: shift,
+                                                card_color: 'yellow',
+                                                timestamp: Date.now()
+                                            });
+                                        }
+
+                                        // 2. Daftar Kehadiran (Masuk / Keluar)
+                                        if (tarikh && tarikh !== '-' && tarikh !== 'null') {
+                                            if (catatan === '-' || catatan === 'null') catatan = '';
+                                            let added = false;
+                                            
+                                            if (mMasuk && mMasuk !== '-') {
+                                                parsedData.push({
+                                                    __backendId: backendId + '_in',
+                                                    type: 'attendance',
+                                                    name: nama,
+                                                    ic: ic,
+                                                    date: tarikh,
+                                                    time: mMasuk,
+                                                    action: 'masuk',
+                                                    note: catatan,
+                                                    timestamp: Date.now() - 1000
+                                                });
+                                                added = true;
+                                            }
+                                            
+                                            if (mKeluar && mKeluar !== '-') {
+                                                parsedData.push({
+                                                    __backendId: backendId + '_out',
+                                                    type: 'attendance',
+                                                    name: nama,
+                                                    ic: ic,
+                                                    date: tarikh,
+                                                    time: mKeluar,
+                                                    action: 'keluar',
+                                                    note: catatan,
+                                                    timestamp: Date.now()
+                                                });
+                                                added = true;
+                                            }
+
+                                            if (!added && (tindakan === 'th' || tindakan === 'bersebab')) {
+                                                parsedData.push({
+                                                    __backendId: backendId + '_' + tindakan,
+                                                    type: 'attendance',
+                                                    name: nama,
+                                                    ic: ic,
+                                                    date: tarikh,
+                                                    time: '-',
+                                                    action: tindakan,
+                                                    note: catatan,
+                                                    timestamp: Date.now()
+                                                });
+                                            }
+                                        }
+                                    });
+                                    
+                                    // Hanya overwrite localStorage jika parsing BERJAYA dan ada data
+                                    if (parsedData.length > 0) {
+                                        localStorage.setItem('debakti_data', JSON.stringify(parsedData));
+                                        handler.onDataChanged(parsedData);
+                                    }
+                                }
+                            } catch (parseError) {
+                                console.error("GVIZ JSON parse failed, retaining local data.", parseError);
+                            }
                         }
                     }
                 } catch (e) {
-                    console.log('Using local storage as primary DB.', e);
+                    console.log('Network error, using local storage as primary DB.', e);
                 }
                 return { isOk: true };
             },
@@ -141,19 +309,37 @@
                     if (record.type === 'attendance') {
                         formData.append('tarikh', record.date || '-');
                         
-                        if (record.action === 'masuk') {
-                            formData.append('masa_masuk', record.time || '-');
-                            formData.append('masa_keluar', '-');
-                        } else if (record.action === 'keluar') {
-                            formData.append('masa_masuk', '-');
-                            formData.append('masa_keluar', record.time || '-');
-                        } else {
-                            formData.append('masa_masuk', '-');
-                            formData.append('masa_keluar', '-');
+                        // CARIAN PINTAR: Kekalkan Masa Masuk & Masa Keluar jika ada pada hari yang sama
+                        // Supaya bila Punch Out, sistem turut menghantar Masa Masuk tanpa memadamnya
+                        const normRecordDate = standardizeDate(record.date);
+                        const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
+                        const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                        
+                        let masaMasuk = existingIn ? existingIn.time : (record.action === 'masuk' ? record.time : '-');
+                        let masaKeluar = existingOut ? existingOut.time : (record.action === 'keluar' ? record.time : '-');
+                        
+                        let finalTindakan = record.action;
+                        if (masaMasuk !== '-' && masaKeluar !== '-') {
+                            finalTindakan = 'Selesai';
+                        } else if (masaMasuk !== '-') {
+                            finalTindakan = 'Masuk';
+                        } else if (masaKeluar !== '-') {
+                            finalTindakan = 'Keluar';
                         }
                         
-                        formData.append('tindakan', record.action || '-');
-                        formData.append('catatan', record.note || '-');
+                        if (record.action === 'th') finalTindakan = 'Tidak Hadir';
+                        if (record.action === 'bersebab') finalTindakan = 'Bersebab';
+                        
+                        formData.append('masa_masuk', masaMasuk);
+                        formData.append('masa_keluar', masaKeluar);
+                        formData.append('tindakan', finalTindakan);
+                        
+                        // Gabungkan semua nota hari ini
+                        let allNotes = [];
+                        const allToday = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.note && r.note !== '-');
+                        allToday.forEach(r => { if (!allNotes.includes(r.note)) allNotes.push(r.note); });
+                        formData.append('catatan', allNotes.length > 0 ? allNotes.join(" | ") : '-');
+                        
                     } else if (record.type === 'user') {
                         formData.append('jawatan', record.role || '-');
                         formData.append('syif', record.shift || '-');
@@ -189,17 +375,42 @@
                     try {
                         const formData = new FormData();
                         formData.append('method', 'update');
-                        formData.append('backendId', record.__backendId);
+                        formData.append('backendId', record.__backendId.replace('_in', '').replace('_out', ''));
                         formData.append('type', record.type);
                         formData.append('nama', record.name || '-');
                         formData.append('ic', record.ic || '-');
                         
                         if (record.type === 'attendance') {
                             formData.append('tarikh', record.date || '-');
-                            formData.append('masa_masuk', record.action === 'masuk' ? record.time : '-');
-                            formData.append('masa_keluar', record.action === 'keluar' ? record.time : '-');
-                            formData.append('tindakan', record.action || '-');
-                            formData.append('catatan', record.note || '-');
+                            
+                            // Kekalkan logik pintar yang sama sewaktu mengemaskini (Edit Punch)
+                            const normRecordDate = standardizeDate(record.date);
+                            const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
+                            const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                            
+                            let masaMasuk = existingIn ? existingIn.time : (record.action === 'masuk' ? record.time : '-');
+                            let masaKeluar = existingOut ? existingOut.time : (record.action === 'keluar' ? record.time : '-');
+                            
+                            let finalTindakan = record.action;
+                            if (masaMasuk !== '-' && masaKeluar !== '-') {
+                                finalTindakan = 'Selesai';
+                            } else if (masaMasuk !== '-') {
+                                finalTindakan = 'Masuk';
+                            } else if (masaKeluar !== '-') {
+                                finalTindakan = 'Keluar';
+                            }
+                            
+                            if (record.action === 'th') finalTindakan = 'Tidak Hadir';
+                            if (record.action === 'bersebab') finalTindakan = 'Bersebab';
+                            
+                            formData.append('masa_masuk', masaMasuk);
+                            formData.append('masa_keluar', masaKeluar);
+                            formData.append('tindakan', finalTindakan);
+                            
+                            let allNotes = [];
+                            const allToday = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.note && r.note !== '-');
+                            allToday.forEach(r => { if (!allNotes.includes(r.note)) allNotes.push(r.note); });
+                            formData.append('catatan', allNotes.length > 0 ? allNotes.join(" | ") : '-');
                         } else if (record.type === 'user') {
                             formData.append('jawatan', record.role || '-');
                             formData.append('syif', record.shift || '-');
@@ -302,6 +513,18 @@
                 state.users = data.filter(r => r.type === 'user');
                 state.attendance = data.filter(r => r.type === 'attendance');
                 state.recordCount = data.length;
+                
+                // Perlindungan: Pastikan currentUser sentiasa dikemaskini mengikut data terbaharu
+                if (state.currentUser) {
+                    const updatedUser = state.users.find(u => u.ic === state.currentUser.ic);
+                    if (updatedUser) {
+                        state.currentUser = updatedUser;
+                    } else {
+                        state.currentUser = null;
+                        state.view = 'login';
+                    }
+                }
+                
                 render();
             }
         };
@@ -463,15 +686,33 @@
             }
         }
 
-        window.editPunchRecord = (recordId, action) => {
-            const record = state.attendance.find(r => r.__backendId === recordId);
-            if (!record) return;
+        window.editPunchRecord = (recordId, action, ic = null, dateStr = null) => {
+            let record = null;
+            if (recordId) {
+                record = state.attendance.find(r => r.__backendId === recordId);
+            }
+            
+            if (!record) {
+                if (!ic || !dateStr) return; // Pelindung jika data tidak lengkap
+                state.editPunchModal = {
+                    recordId: 'new_' + Math.random().toString(36).substr(2, 9),
+                    action: action,
+                    currentTime: '',
+                    currentDate: dateStr,
+                    ic: ic,
+                    isNew: true
+                };
+                render();
+                return;
+            }
             
             state.editPunchModal = {
                 recordId: recordId,
                 action: action,
                 currentTime: record.time,
-                currentDate: record.date
+                currentDate: record.date,
+                ic: record.ic,
+                isNew: false
             };
             render();
         };
@@ -483,6 +724,7 @@
 
         window.submitEditPunchRecord = async (e) => {
             e.preventDefault();
+            if (state.loading) return; // Anti-spam
             
             const newDate = document.getElementById('edit-punch-date').value.trim();
             const newTime = document.getElementById('edit-punch-time').value.trim();
@@ -508,27 +750,43 @@
             
             if (!state.editPunchModal) return;
             
-            const record = state.attendance.find(r => r.__backendId === state.editPunchModal.recordId);
-            if (!record) return;
-            
             state.loading = true;
             render();
             
-            record.date = newDate;
-            record.time = newTime;
-            
-            const result = await window.dataSdk.update(record);
+            if (state.editPunchModal.isNew) {
+                const user = state.users.find(u => u.ic === state.editPunchModal.ic);
+                if (user) {
+                    await window.dataSdk.create({
+                        type: 'attendance',
+                        name: user.name,
+                        ic: user.ic,
+                        role: user.role,
+                        shift: user.shift,
+                        date: newDate,
+                        time: newTime,
+                        action: state.editPunchModal.action === 'in' ? 'masuk' : 'keluar',
+                        note: '',
+                        timestamp: Date.now()
+                    });
+                    notify('Rekod punch berjaya ditambah!', 'success');
+                }
+            } else {
+                const record = state.attendance.find(r => r.__backendId === state.editPunchModal.recordId);
+                if (record) {
+                    record.date = newDate;
+                    record.time = newTime;
+                    const result = await window.dataSdk.update(record);
+                    if (result.isOk) {
+                        notify('Rekod punch berjaya dikemaskini!', 'success');
+                    } else {
+                        notify('Ralat mengemaskini rekod punch!', 'error');
+                    }
+                }
+            }
             
             state.loading = false;
-            
-            if (result.isOk) {
-                notify('Rekod punch berjaya dikemaskini!', 'success');
-                state.editPunchModal = null;
-                render();
-            } else {
-                notify('Ralat mengemaskini rekod punch!', 'error');
-                render();
-            }
+            state.editPunchModal = null;
+            render();
         };
 
         window.promptDeleteUser = (user) => {
@@ -548,7 +806,7 @@
             const todayAttendance = state.attendance.filter(r => {
                 const user = state.users.find(u => u.ic === r.ic);
                 if (!user || !(user.role === 'guru' || user.role === 'akp' || user.role === 'guru besar')) return false;
-                if (r.date !== today) return false;
+                if (standardizeDate(r.date) !== today) return false;
                 
                 if (r.action === 'masuk') return true;
                 if (r.action === 'bersebab') {
@@ -565,7 +823,7 @@
             
             let tableRows = '';
             staff.sort((a,b) => a.name.localeCompare(b.name)).forEach(u => {
-                const dayRecords = state.attendance.filter(a => a.ic === u.ic && a.date === today);
+                const dayRecords = state.attendance.filter(a => a.ic === u.ic && standardizeDate(a.date) === today);
                 const clockIn = dayRecords.find(r => r.action === 'masuk');
                 const clockOut = dayRecords.find(r => r.action === 'keluar');
                 const thRecord = dayRecords.find(r => r.action === 'th');
@@ -755,7 +1013,8 @@
                 if (r.ic !== state.selectedStaffIc) return false;
                 
                 // Parse DD/MM/YYYY format
-                const parts = r.date.split('/');
+                const normDate = standardizeDate(r.date);
+                const parts = normDate.split('/');
                 if (parts.length !== 3) return false;
                 
                 const recordDay = parseInt(parts[0], 10);
@@ -764,8 +1023,8 @@
                 
                 return recordMonth === state.selectedMonth && recordYear === state.selectedYear;
             }).sort((a, b) => {
-                const partsA = a.date.split('/');
-                const partsB = b.date.split('/');
+                const partsA = standardizeDate(a.date).split('/');
+                const partsB = standardizeDate(b.date).split('/');
                 const dateA = new Date(parseInt(partsA[2]), parseInt(partsA[1]) - 1, parseInt(partsA[0]));
                 const dateB = new Date(parseInt(partsB[2]), parseInt(partsB[1]) - 1, parseInt(partsB[0]));
                 return dateA - dateB;
@@ -779,7 +1038,7 @@
                 const monthStr = String(state.selectedMonth + 1).padStart(2, '0');
                 const dateStr = `${dayStr}/${monthStr}/${state.selectedYear}`;
                 
-                const dayRecords = monthRecords.filter(r => r.date === dateStr);
+                const dayRecords = monthRecords.filter(r => standardizeDate(r.date) === dateStr);
                 const clockIn = dayRecords.find(r => r.action === 'masuk');
                 const clockOut = dayRecords.find(r => r.action === 'keluar');
                 const thRecord = dayRecords.find(r => r.action === 'th');
@@ -998,10 +1257,13 @@
             } else if (state.view === 'register') {
                 content = renderRegister(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor);
             } else if (state.view === 'dashboard') {
+                if (!state.currentUser) { state.view = 'login'; return render(); } // Fallback jika user loss
                 content = renderDashboard(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor);
             } else if (state.view === 'admin') {
+                if (!state.currentUser) { state.view = 'login'; return render(); } // Fallback jika user loss
                 content = renderAdmin(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor);
             } else if (state.view === 'report') {
+                if (!state.currentUser) { state.view = 'login'; return render(); } // Fallback jika user loss
                 content = renderReport(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor);
             }
 
@@ -1032,8 +1294,7 @@
             if (!state.editPunchModal) return '';
             
             const { recordId, action, currentTime, currentDate } = state.editPunchModal;
-            const record = state.attendance.find(r => r.__backendId === recordId);
-            if (!record) return '';
+            let record = state.attendance.find(r => r.__backendId === recordId);
             
             return `
                 <div class="modal-backdrop" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 999; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(15, 23, 42, 0.9); backdrop-filter: blur(8px);">
@@ -1150,11 +1411,12 @@
                                 </button>
                                 <button 
                                     type="submit"
-                                    style="flex: 1; padding: 14px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: pointer; text-transform: uppercase; box-shadow: 0 8px 16px rgba(59, 130, 246, 0.4); transition: all 0.2s;"
-                                    onmouseover="this.style.transform='translateY(-2px)'"
+                                    ${state.loading ? 'disabled' : ''}
+                                    style="flex: 1; padding: 14px; background: ${state.loading ? '#94a3b8' : primaryColor}; color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; text-transform: uppercase; box-shadow: 0 8px 16px rgba(59, 130, 246, 0.4); transition: all 0.2s; display: flex; justify-content: center; align-items: center; gap: 8px;"
+                                    onmouseover="if(!${state.loading}) this.style.transform='translateY(-2px)'"
                                     onmouseout="this.style.transform='translateY(0)'"
                                 >
-                                    Simpan
+                                    ${state.loading ? '<div class="loading-spinner"></div>' : ''} Simpan
                                 </button>
                             </div>
                         </form>
@@ -1313,11 +1575,12 @@
                                     </button>
                                     <button 
                                         type="submit"
-                                        style="flex: 1; padding: 14px; background: ${state.punchModalAction === 'th' ? '#ef4444' : '#f59e0b'}; color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: pointer; text-transform: uppercase; box-shadow: 0 8px 16px ${state.punchModalAction === 'th' ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}; transition: all 0.2s;"
-                                        onmouseover="this.style.transform='translateY(-2px)'"
+                                        ${state.loading ? 'disabled' : ''}
+                                        style="flex: 1; padding: 14px; background: ${state.loading ? '#94a3b8' : (state.punchModalAction === 'th' ? '#ef4444' : '#f59e0b')}; color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; text-transform: uppercase; box-shadow: 0 8px 16px ${state.punchModalAction === 'th' ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;"
+                                        onmouseover="if(!${state.loading}) this.style.transform='translateY(-2px)'"
                                         onmouseout="this.style.transform='translateY(0)'"
                                     >
-                                        Sahkan
+                                        ${state.loading ? '<div class="loading-spinner"></div>' : ''} Sahkan
                                     </button>
                                 </div>
                             </form>
@@ -1353,9 +1616,10 @@
                                 </button>
                                 <button 
                                     type="submit"
-                                    style="flex: 1; padding: 12px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer;"
+                                    ${state.loading ? 'disabled' : ''}
+                                    style="flex: 1; padding: 12px; background: ${state.loading ? '#94a3b8' : primaryColor}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 700; border: none; border-radius: 8px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; display: flex; align-items: center; justify-content: center; gap: 8px;"
                                 >
-                                    ${actionText}
+                                    ${state.loading ? '<div class="loading-spinner"></div>' : ''} ${actionText}
                                 </button>
                             </div>
                         </form>
@@ -1412,6 +1676,7 @@
                             
                             <div style="display: flex; gap: 12px;">
                                 <button 
+                                    type="button"
                                     onclick="closeDeleteModal()"
                                     style="flex: 1; padding: 14px; background: #f1f5f9; color: #475569; font-size: ${baseSize * 0.85}px; font-weight: 700; border: none; border-radius: 12px; cursor: pointer; text-transform: uppercase; transition: all 0.2s;"
                                     onmouseover="this.style.background='#e2e8f0'"
@@ -1420,12 +1685,12 @@
                                     Batal
                                 </button>
                                 <button 
+                                    type="button"
+                                    ${state.loading ? 'disabled' : ''}
                                     onclick="confirmDelete()"
-                                    style="flex: 1; padding: 14px; background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%); color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: pointer; text-transform: uppercase; box-shadow: 0 8px 16px rgba(239, 68, 68, 0.4); transition: all 0.2s;"
-                                    onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 12px 24px rgba(239, 68, 68, 0.5)'"
-                                    onmouseout="this.style.transform='translateY(0)'; this.style.boxShadow='0 8px 16px rgba(239, 68, 68, 0.4)'"
+                                    style="flex: 1; padding: 14px; background: ${state.loading ? '#94a3b8' : 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)'}; color: white; font-size: ${baseSize * 0.85}px; font-weight: 800; border: none; border-radius: 12px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; text-transform: uppercase; box-shadow: 0 8px 16px rgba(239, 68, 68, 0.4); transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;"
                                 >
-                                    Ya, Hapus
+                                    ${state.loading ? '<div class="loading-spinner"></div>' : ''} Ya, Hapus
                                 </button>
                             </div>
                         </div>
@@ -1446,16 +1711,19 @@
                             
                             <div style="display: flex; gap: 12px;">
                                 <button 
+                                    type="button"
                                     onclick="closeDeleteModal()"
                                     style="flex: 1; padding: 12px; background: #e2e8f0; color: ${textColor}; font-size: ${baseSize * 0.9}px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;"
                                 >
                                     Batal
                                 </button>
                                 <button 
+                                    type="button"
+                                    ${state.loading ? 'disabled' : ''}
                                     onclick="confirmDelete()"
-                                    style="flex: 1; padding: 12px; background: #ef4444; color: white; font-size: ${baseSize * 0.9}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer;"
+                                    style="flex: 1; padding: 12px; background: ${state.loading ? '#94a3b8' : '#ef4444'}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 700; border: none; border-radius: 8px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; display: flex; align-items: center; justify-content: center; gap: 8px;"
                                 >
-                                    Ya, Padam
+                                    ${state.loading ? '<div class="loading-spinner"></div>' : ''} Ya, Padam
                                 </button>
                             </div>
                         </div>
@@ -1493,9 +1761,8 @@
                             
                             <button 
                                 type="submit"
-                                style="width: 100%; padding: 14px; background: ${primaryColor}; color: white; font-size: ${baseSize}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s;"
-                                onmouseover="this.style.opacity='0.9'"
-                                onmouseout="this.style.opacity='1'"
+                                ${state.loading ? 'disabled' : ''}
+                                style="width: 100%; padding: 14px; background: ${state.loading ? '#94a3b8' : primaryColor}; color: white; font-size: ${baseSize}px; font-weight: 700; border: none; border-radius: 8px; cursor: ${state.loading ? 'not-allowed' : 'pointer'}; transition: all 0.2s;"
                             >
                                 ${config.login_button_text || defaultConfig.login_button_text}
                             </button>
@@ -1503,6 +1770,7 @@
 
                         <div style="margin-top: 24px; text-align: center;">
                             <button 
+                                type="button"
                                 onclick="state.view='register'; render();"
                                 style="color: ${primaryColor}; font-size: ${baseSize * 0.9}px; font-weight: 600; background: none; border: none; cursor: pointer; text-decoration: underline;"
                             >
@@ -1612,6 +1880,7 @@
 
                         <div style="margin-top: 16px; text-align: center;">
                             <button 
+                                type="button"
                                 onclick="state.view='login'; state.regRole=null; state.regName=''; state.regIc=''; state.regShift=''; render();"
                                 style="color: ${secondaryColor}; font-size: ${baseSize * 0.8}px; font-weight: 700; background: none; border: none; cursor: pointer; text-transform: uppercase; text-decoration: underline;"
                             >
@@ -1632,7 +1901,7 @@
             
             const todayRecords = state.attendance.filter(r => 
                 r.ic === state.currentUser.ic && 
-                r.date === today
+                standardizeDate(r.date) === today
             );
 
             const lastClockIn = todayRecords.filter(r => r.action === 'masuk').sort((a, b) => b.timestamp - a.timestamp)[0];
@@ -1667,6 +1936,7 @@
                                 </div>
                             </div>
                             <button 
+                                type="button"
                                 onclick="handleLogout()"
                                 style="padding: 10px 20px; background: ${currentCardStyle.text}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.2);"
                             >
@@ -1698,6 +1968,7 @@
                             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
                                 ${!isCompleted ? `
                                     <button 
+                                        type="button"
                                         onclick="showPunchModal('${isPunchIn ? 'keluar' : 'masuk'}')"
                                         ${state.loading ? 'disabled' : ''}
                                         style="padding: 24px; background: ${isPunchIn ? '#f97316' : '#10b981'}; color: white; font-size: ${baseSize * 1.2}px; font-weight: 800; border: none; border-radius: 16px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; text-transform: uppercase; box-shadow: 0 8px 20px rgba(0,0,0,0.15); transition: all 0.2s;"
@@ -1727,12 +1998,14 @@
                                 
                                 ${!lastClockIn && !isCompleted ? `
                                     <button 
+                                        type="button"
                                         onclick="showPunchModal('th')"
                                         style="padding: 24px; background: #ef4444; color: white; font-size: ${baseSize * 0.8}px; font-weight: 800; border: none; border-radius: 16px; cursor: pointer; text-transform: uppercase; box-shadow: 0 8px 20px rgba(239, 68, 68, 0.3);"
                                     >
                                         Tidak Hadir
                                     </button>
                                     <button 
+                                        type="button"
                                         onclick="showPunchModal('bersebab')"
                                         style="padding: 24px; background: #f59e0b; color: white; font-size: ${baseSize * 0.8}px; font-weight: 800; border: none; border-radius: 16px; cursor: pointer; text-transform: uppercase; box-shadow: 0 8px 20px rgba(245, 158, 11, 0.3);"
                                     >
@@ -1797,7 +2070,7 @@
             const todayAttendance = state.attendance.filter(r => {
                 const user = state.users.find(u => u.ic === r.ic);
                 if (!user || !(user.role === 'guru' || user.role === 'akp' || user.role === 'guru besar')) return false;
-                if (r.date !== today) return false;
+                if (standardizeDate(r.date) !== today) return false;
                 
                 if (r.action === 'masuk') return true;
                 if (r.action === 'bersebab') {
@@ -1822,12 +2095,14 @@
                             </div>
                             <div style="display: flex; gap: 12px; flex-wrap: wrap;">
                                 <button 
+                                    type="button"
                                     onclick="showEditUserModal('${state.currentUser.__backendId}')"
                                     style="padding: 10px 20px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;"
                                 >
                                     ✏️ Edit Profil
                                 </button>
                                 <button 
+                                    type="button"
                                     onclick="handleLogout()"
                                     style="padding: 10px 20px; background: ${secondaryColor}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;"
                                 >
@@ -1838,18 +2113,21 @@
 
                         <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px;">
                             <button 
+                                type="button"
                                 onclick="state.adminTab='daily'; render();"
                                 style="padding: 10px 20px; background: ${state.adminTab === 'daily' ? primaryColor : surfaceColor}; color: ${state.adminTab === 'daily' ? 'white' : textColor}; font-size: ${baseSize * 0.75}px; font-weight: 700; border: ${state.adminTab === 'daily' ? 'none' : '2px solid #e2e8f0'}; border-radius: 12px; cursor: pointer; text-transform: uppercase;"
                             >
                                 Harian
                             </button>
                             <button 
+                                type="button"
                                 onclick="state.adminTab='monthly'; state.view='report'; render();"
                                 style="padding: 10px 20px; background: ${surfaceColor}; color: ${textColor}; font-size: ${baseSize * 0.75}px; font-weight: 700; border: 2px solid #e2e8f0; border-radius: 12px; cursor: pointer; text-transform: uppercase;"
                             >
                                 Bulanan
                             </button>
                             <button 
+                                type="button"
                                 onclick="state.adminTab='staff'; render();"
                                 style="padding: 10px 20px; background: ${state.adminTab === 'staff' ? '#ef4444' : surfaceColor}; color: ${state.adminTab === 'staff' ? 'white' : textColor}; font-size: ${baseSize * 0.75}px; font-weight: 700; border: ${state.adminTab === 'staff' ? 'none' : '2px solid #e2e8f0'}; border-radius: 12px; cursor: pointer; text-transform: uppercase; margin-left: auto;"
                             >
@@ -1905,6 +2183,7 @@
                                                                     <option value="red" ${(u.card_color || 'yellow') === 'red' ? 'selected' : ''}>🔴 MERAH</option>
                                                                 </select>
                                                                 <button 
+                                                                    type="button"
                                                                     onclick="showEditUserModal('${u.__backendId}')"
                                                                     style="padding: 6px 12px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.7}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3); transition: all 0.2s;"
                                                                     onmouseover="this.style.background='#2563eb'"
@@ -1914,6 +2193,7 @@
                                                                 </button>
                                                                 ${u.ic !== state.currentUser.ic ? `
                                                                     <button 
+                                                                        type="button"
                                                                         onclick='promptDeleteUser(${JSON.stringify(u).replace(/'/g, "&apos;")})'
                                                                         style="padding: 6px 12px; background: #dc2626; color: white; font-size: ${baseSize * 0.7}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; box-shadow: 0 2px 8px rgba(220, 38, 38, 0.3); transition: all 0.2s;"
                                                                         onmouseover="this.style.background='#b91c1c'"
@@ -1967,6 +2247,7 @@
                                         Rekod Harian (${today})
                                     </div>
                                     <button 
+                                        type="button"
                                         onclick="printDailyReport()"
                                         style="padding: 8px 16px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.7}px; font-weight: 700; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase;"
                                     >
@@ -1986,7 +2267,7 @@
                                         </thead>
                                         <tbody>
                                             ${staff.sort((a,b) => a.name.localeCompare(b.name)).map(u => {
-                                                const dayRecords = state.attendance.filter(a => a.ic === u.ic && a.date === today);
+                                                const dayRecords = state.attendance.filter(a => a.ic === u.ic && standardizeDate(a.date) === today);
                                                 const clockIn = dayRecords.find(r => r.action === 'masuk');
                                                 const clockOut = dayRecords.find(r => r.action === 'keluar');
                                                 const thRecord = dayRecords.find(r => r.action === 'th');
@@ -1999,7 +2280,6 @@
                                                     statusHtml = `<span style="display: inline-block; padding: 6px 12px; background: #fecaca; color: #7f1d1d; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 800; text-transform: uppercase;">Tidak Hadir</span>`;
                                                     noteText = thRecord.note || '-';
                                                 } else if (bersebabRecord) {
-                                                    // Semak jika catatan mengandungi "CUTI BERSALIN" - jika ya, status = TIDAK HADIR
                                                     const noteContent = (bersebabRecord.note || '').toUpperCase();
                                                     if (noteContent.includes('CUTI BERSALIN')) {
                                                         statusHtml = `<span style="display: inline-block; padding: 6px 12px; background: #fecaca; color: #7f1d1d; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 800; text-transform: uppercase;">Tidak Hadir</span>`;
@@ -2007,9 +2287,9 @@
                                                         statusHtml = `<span style="display: inline-block; padding: 6px 12px; background: #dcfce7; color: #166534; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 800; text-transform: uppercase;">Hadir</span>`;
                                                     }
                                                     noteText = bersebabRecord.note || '-';
-                                                } else if (clockIn) {
+                                                } else if (clockIn || clockOut) {
                                                     statusHtml = `<span style="display: inline-block; padding: 6px 12px; background: #dcfce7; color: #166534; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 800; text-transform: uppercase;">Hadir</span>`;
-                                                    noteText = clockIn.note || clockOut?.note || '-';
+                                                    noteText = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '-';
                                                 } else {
                                                     statusHtml = `<span style="display: inline-block; padding: 6px 12px; background: #fee2e2; color: #991b1b; border-radius: 8px; font-size: ${baseSize * 0.7}px; font-weight: 800; text-transform: uppercase;">Tidak Hadir</span>`;
                                                     noteText = '-';
@@ -2023,11 +2303,11 @@
                                                         </td>
                                                         <td style="padding: 16px; text-align: center; font-size: ${baseSize * 0.85}px; color: ${textColor}; font-weight: 700;">
                                                             ${clockIn ? clockIn.time : '--:--'}
-                                                            ${clockIn ? `<button onclick="editPunchRecord('${clockIn.__backendId}', 'in')" type="button" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>` : ''}
+                                                            <button type="button" onclick="editPunchRecord('${clockIn ? clockIn.__backendId : ''}', 'in', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>
                                                         </td>
                                                         <td style="padding: 16px; text-align: center; font-size: ${baseSize * 0.85}px; color: ${textColor}; font-weight: 700;">
                                                             ${clockOut ? clockOut.time : '--:--'}
-                                                            ${clockOut ? `<button onclick="editPunchRecord('${clockOut.__backendId}', 'out')" type="button" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>` : ''}
+                                                            <button type="button" onclick="editPunchRecord('${clockOut ? clockOut.__backendId : ''}', 'out', '${u.ic}', '${today}')" style="margin-left: 4px; padding: 2px 6px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.6}px; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">✏️</button>
                                                         </td>
                                                         <td style="padding: 16px; text-align: center;">
                                                             ${statusHtml}
@@ -2036,8 +2316,8 @@
                                                             ${noteText}
                                                             ${!clockIn && !thRecord && !bersebabRecord ? `
                                                                 <button 
-                                                                    onclick="addAdminNote('${u.ic}', '${today}')"
                                                                     type="button"
+                                                                    onclick="addAdminNote('${u.ic}', '${today}')"
                                                                     style="margin-left: 8px; padding: 4px 10px; background: ${primaryColor}; color: white; font-size: ${baseSize * 0.65}px; font-weight: 700; border: none; border-radius: 6px; cursor: pointer; text-transform: uppercase;"
                                                                 >
                                                                     + Catatan
@@ -2045,8 +2325,8 @@
                                                             ` : ''}
                                                             ${clockIn || thRecord || bersebabRecord ? `
                                                                 <button 
-                                                                    onclick="editDailyRecord('${u.ic}', '${today}')"
                                                                     type="button"
+                                                                    onclick="editDailyRecord('${u.ic}', '${today}')"
                                                                     style="margin-left: 8px; padding: 4px 10px; background: #f59e0b; color: white; font-size: ${baseSize * 0.65}px; font-weight: 700; border: none; border-radius: 6px; cursor: pointer; text-transform: uppercase;"
                                                                 >
                                                                     ✏️ Edit
@@ -2079,7 +2359,8 @@
                 if (r.ic !== state.selectedStaffIc) return false;
                 
                 // Parse DD/MM/YYYY format
-                const parts = r.date.split('/');
+                const normDate = standardizeDate(r.date);
+                const parts = normDate.split('/');
                 if (parts.length !== 3) return false;
                 
                 const recordDay = parseInt(parts[0], 10);
@@ -2088,8 +2369,8 @@
                 
                 return recordMonth === state.selectedMonth && recordYear === state.selectedYear;
             }).sort((a, b) => {
-                const partsA = a.date.split('/');
-                const partsB = b.date.split('/');
+                const partsA = standardizeDate(a.date).split('/');
+                const partsB = standardizeDate(b.date).split('/');
                 const dateA = new Date(parseInt(partsA[2]), parseInt(partsA[1]) - 1, parseInt(partsA[0]));
                 const dateB = new Date(parseInt(partsB[2]), parseInt(partsB[1]) - 1, parseInt(partsB[0]));
                 return dateA - dateB;
@@ -2103,7 +2384,7 @@
                 const monthStr = String(state.selectedMonth + 1).padStart(2, '0');
                 const dateStr = `${dayStr}/${monthStr}/${state.selectedYear}`;
                 
-                const dayRecords = monthRecords.filter(r => r.date === dateStr);
+                const dayRecords = monthRecords.filter(r => standardizeDate(r.date) === dateStr);
                 const clockIn = dayRecords.find(r => r.action === 'masuk');
                 const clockOut = dayRecords.find(r => r.action === 'keluar');
                 const thRecord = dayRecords.find(r => r.action === 'th');
@@ -2147,6 +2428,7 @@
                                 Laporan Kehadiran Bulanan
                             </div>
                             <button 
+                                type="button"
                                 onclick="state.view='admin'; render();"
                                 style="padding: 10px 20px; background: ${secondaryColor}; color: white; font-size: ${baseSize * 0.9}px; font-weight: 600; border: none; border-radius: 8px; cursor: pointer;"
                             >
@@ -2261,6 +2543,7 @@
 
                                 <div style="margin-top: 32px; text-align: center;">
                                     <button 
+                                        type="button"
                                         onclick="printPDF()"
                                         style="padding: 14px 40px; background: ${primaryColor}; color: white; font-size: ${baseSize * 1.1}px; font-weight: 800; border: none; border-radius: 12px; cursor: pointer; text-transform: uppercase; box-shadow: 0 4px 12px rgba(59, 130, 246, 0.4);"
                                     >
@@ -2276,6 +2559,7 @@
 
         window.handleLogin = (e) => {
             e.preventDefault();
+            if (state.loading) return;
             const icInput = e.target.ic.value.trim();
             const icClean = icInput.replace(/[-\s]/g, '');
             
@@ -2300,6 +2584,8 @@
 
         window.handleRegister = (e) => {
             e.preventDefault();
+            if (state.loading) return;
+            
             const name = state.regName.trim();
             const ic = state.regIc.trim();
             const role = document.getElementById('reg-role').value;
@@ -2349,6 +2635,7 @@
 
         window.submitPunchWithNote = async (e) => {
             e.preventDefault();
+            if (state.loading) return;
             
             let note = '';
             const categorySelect = document.getElementById('punch-category');
@@ -2393,7 +2680,7 @@
         };
 
         window.confirmDelete = async () => {
-            if (!state.deleteModal) return;
+            if (!state.deleteModal || state.loading) return;
             
             const { type, backendId } = state.deleteModal;
             
@@ -2430,6 +2717,7 @@
 
         window.submitEditUser = async (e) => {
             e.preventDefault();
+            if (state.loading) return;
             
             const user = state.users.find(u => u.__backendId === state.editUserModal);
             if (!user) return;
@@ -2490,7 +2778,7 @@
             const user = state.users.find(u => u.ic === userIc);
             if (!user) return;
             
-            const dayRecords = state.attendance.filter(a => a.ic === userIc && a.date === dateStr);
+            const dayRecords = state.attendance.filter(a => a.ic === userIc && standardizeDate(a.date) === dateStr);
             const clockIn = dayRecords.find(r => r.action === 'masuk');
             const clockOut = dayRecords.find(r => r.action === 'keluar');
             const thRecord = dayRecords.find(r => r.action === 'th');
@@ -2535,6 +2823,7 @@
 
         window.submitNoteModal = async (e) => {
             e.preventDefault();
+            if (state.loading) return; // Anti-spam
             
             const noteInput = document.getElementById('note-input').value.trim();
             
