@@ -100,6 +100,14 @@
  <body class="h-full">
   <div id="app" class="h-full w-full overflow-auto"></div>
   <script>
+        const getLocalDateStr = () => {
+            const d = new Date();
+            const year = d.getFullYear();
+            const month = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+        };
+
         const standardizeDate = (dStr) => {
             if (!dStr) return '';
             // Pelindung jika GVIZ beri format Date(YYYY,M,D)
@@ -143,12 +151,12 @@
 
         window.dataSdk = {
             async init(handler) {
-                const data = JSON.parse(localStorage.getItem('debakti_data') || '[]');
+                let data = JSON.parse(localStorage.getItem('debakti_data') || '[]');
                 handler.onDataChanged(data);
                 
                 try {
-                    // Panggil data SPREADSHEET secara public (viewer)
-                    const response = await fetch(GVIZ_URL + '&_=' + Date.now());
+                    // Panggil data SPREADSHEET secara public (viewer) dengan cache buster
+                    const response = await fetch(GVIZ_URL + '&_x=' + Date.now());
                     if (response.ok) {
                         const text = await response.text();
                         const startIdx = text.indexOf('{');
@@ -190,6 +198,8 @@
                                         };
                                         const getCellF = (idx) => (r.c && r.c[idx] && r.c[idx].f !== null && r.c[idx].f !== undefined) ? String(r.c[idx].f) : getCell(idx);
                                         
+                                        let backendId = String(flatRow['backendid'] || getCell(0) || Math.random().toString());
+                                        let jenis = String(flatRow['jenis'] || getCell(1)).toLowerCase().trim();
                                         let ic = String(flatRow['ic'] || flatRow['ktp'] || getCell(3)).trim();
                                         if(!ic || ic === '-' || ic.toLowerCase() === 'ic' || ic.toLowerCase() === 'k/p') return; 
                                         
@@ -237,27 +247,48 @@
                                         
                                         let tindakan = String(flatRow['tindakan'] || getCell(7)).toLowerCase().trim();
                                         let catatan = String(flatRow['catatan'] || getCell(8)).trim();
-                                        let backendId = String(flatRow['backendid'] || getCell(0) || Math.random().toString());
+
+                                        let rawDataStr = String(flatRow['rawdata(sistem)'] || flatRow['rawdata'] || getCell(10)).trim();
+                                        let cColor = 'yellow';
+                                        try {
+                                            if (rawDataStr && rawDataStr.startsWith('{')) {
+                                                let parsedRaw = JSON.parse(rawDataStr);
+                                                if (parsedRaw.card_color) cColor = parsedRaw.card_color;
+                                            }
+                                        } catch(e) {}
 
                                         // 1. Daftar User
-                                        if (!parsedData.find(p => p.ic === ic && p.type === 'user')) {
-                                            let role = 'guru';
-                                            let shift = 'Tidak Berkenaan';
-                                            if (jawatanSyif && jawatanSyif !== '-') {
-                                                let parts = jawatanSyif.split('/');
-                                                role = parts[0].trim().toLowerCase();
-                                                if (parts.length > 1) shift = parts.slice(1).join('/').trim();
-                                            }
-                                            parsedData.push({
+                                        let role = 'guru';
+                                        let shift = 'Tidak Berkenaan';
+                                        if (jawatanSyif && jawatanSyif !== '-') {
+                                            let parts = jawatanSyif.split('/');
+                                            role = parts[0].trim().toLowerCase();
+                                            if (parts.length > 1) shift = parts.slice(1).join('/').trim();
+                                        }
+
+                                        let userEntry = parsedData.find(p => p.ic === ic && p.type === 'user');
+                                        if (!userEntry) {
+                                            userEntry = {
                                                 __backendId: backendId + '_usr',
                                                 type: 'user',
                                                 name: nama,
                                                 ic: ic,
                                                 role: role,
                                                 shift: shift,
-                                                card_color: 'yellow',
+                                                card_color: cColor,
                                                 timestamp: Date.now()
-                                            });
+                                            };
+                                            parsedData.push(userEntry);
+                                        } else {
+                                            // Menetapkan warna mengikut baris 'user' sebenar dari Google Sheet
+                                            if (jenis === 'user') {
+                                                userEntry.card_color = cColor;
+                                                userEntry.name = nama;
+                                                userEntry.role = role;
+                                                userEntry.shift = shift;
+                                            } else if (userEntry.card_color === 'yellow' && cColor !== 'yellow') {
+                                                userEntry.card_color = cColor;
+                                            }
                                         }
 
                                         // 2. Daftar Kehadiran (Masuk / Keluar)
@@ -312,10 +343,33 @@
                                         }
                                     });
                                     
-                                    // Hanya overwrite localStorage jika parsing BERJAYA dan ada data
-                                    if (parsedData.length > 0) {
-                                        localStorage.setItem('debakti_data', JSON.stringify(parsedData));
-                                        handler.onDataChanged(parsedData);
+                                    // Merge Data Tempatan yang baru diedit (supaya tak hilang bila GVIZ cache lambat update)
+                                    const localData = JSON.parse(localStorage.getItem('debakti_data') || '[]');
+                                    const deletedIds = JSON.parse(localStorage.getItem('debakti_deleted') || '[]');
+                                    
+                                    let finalData = parsedData.map(remoteRec => {
+                                        const localRec = localData.find(l => l.__backendId === remoteRec.__backendId);
+                                        // Kekalkan rekod local jika ia baru diubah kurang 5 minit
+                                        if (localRec && localRec._localUpdatedAt && (Date.now() - localRec._localUpdatedAt < 5 * 60 * 1000)) {
+                                            return localRec;
+                                        }
+                                        return remoteRec;
+                                    });
+                                    
+                                    // Tambah rekod local yang baru ditambah
+                                    localData.forEach(localRec => {
+                                        if (localRec._localUpdatedAt && (Date.now() - localRec._localUpdatedAt < 5 * 60 * 1000)) {
+                                            if (!finalData.find(r => r.__backendId === localRec.__backendId)) {
+                                                finalData.push(localRec);
+                                            }
+                                        }
+                                    });
+                                    
+                                    finalData = finalData.filter(r => !deletedIds.includes(r.__backendId));
+                                    
+                                    if (finalData.length > 0) {
+                                        localStorage.setItem('debakti_data', JSON.stringify(finalData));
+                                        handler.onDataChanged(finalData);
                                     }
                                 }
                             } catch (parseError) {
@@ -330,6 +384,7 @@
             },
             async create(record) {
                 record.__backendId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+                record._localUpdatedAt = Date.now();
                 const data = JSON.parse(localStorage.getItem('debakti_data') || '[]');
                 data.push(record);
                 localStorage.setItem('debakti_data', JSON.stringify(data));
@@ -399,6 +454,7 @@
                 return { isOk: true };
             },
             async update(record) {
+                record._localUpdatedAt = Date.now();
                 const data = JSON.parse(localStorage.getItem('debakti_data') || '[]');
                 const index = data.findIndex(r => r.__backendId === record.__backendId);
                 if (index !== -1) {
@@ -407,8 +463,17 @@
                     
                     try {
                         const formData = new FormData();
-                        formData.append('method', 'update');
-                        formData.append('backendId', record.__backendId.replace('_in', '').replace('_out', ''));
+                        
+                        formData.append('method', 'update'); 
+                        
+                        let rawId = record.__backendId;
+                        if(rawId.includes('_in')) rawId = rawId.replace('_in', '');
+                        else if(rawId.includes('_out')) rawId = rawId.replace('_out', '');
+                        else if(rawId.includes('_th')) rawId = rawId.replace('_th', '');
+                        else if(rawId.includes('_bersebab')) rawId = rawId.replace('_bersebab', '');
+                        else if(rawId.includes('_usr')) rawId = rawId.replace('_usr', '');
+                        
+                        formData.append('backendId', rawId);
                         formData.append('type', record.type);
                         formData.append('nama', record.name || '-');
                         formData.append('ic', record.ic || '-');
@@ -453,7 +518,8 @@
                             formData.append('catatan', '-');
                         }
 
-                        formData.append('rawData', JSON.stringify(record));
+                        let rawRecord = { ...record, __backendId: rawId };
+                        formData.append('rawData', JSON.stringify(rawRecord));
 
                         fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', body: formData });
                     } catch (e) {}
@@ -468,10 +534,22 @@
                 data = data.filter(r => r.__backendId !== record.__backendId);
                 localStorage.setItem('debakti_data', JSON.stringify(data));
                 
+                let deletedIds = JSON.parse(localStorage.getItem('debakti_deleted') || '[]');
+                deletedIds.push(record.__backendId);
+                localStorage.setItem('debakti_deleted', JSON.stringify(deletedIds));
+                
                 try {
                     const formData = new FormData();
                     formData.append('method', 'delete');
-                    formData.append('backendId', record.__backendId);
+                    
+                    let rawId = record.__backendId;
+                    if(rawId.includes('_in')) rawId = rawId.replace('_in', '');
+                    else if(rawId.includes('_out')) rawId = rawId.replace('_out', '');
+                    else if(rawId.includes('_th')) rawId = rawId.replace('_th', '');
+                    else if(rawId.includes('_bersebab')) rawId = rawId.replace('_bersebab', '');
+                    else if(rawId.includes('_usr')) rawId = rawId.replace('_usr', '');
+                    
+                    formData.append('backendId', rawId);
                     fetch(SCRIPT_URL, { method: 'POST', mode: 'no-cors', body: formData });
                 } catch (e) {}
 
@@ -538,7 +616,7 @@
             adminTab: 'daily',
             initialized: false,
             selectedNoteStatus: 'hadir',
-            adminSelectedDate: new Date().toISOString().split('T')[0]
+            adminSelectedDate: getLocalDateStr()
         };
 
         const dataHandler = {
@@ -1027,236 +1105,6 @@
                                 <th style="text-align: center;">MASA</th>
                                 <th style="text-align: center;">STATUS</th>
                                 <th style="text-align: left;">CATATAN</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            ${tableRows}
-                        </tbody>
-                    </table>
-                    
-                    <div class="print-button" style="margin-top: 30px; text-align: center; display: flex; gap: 16px; justify-content: center;">
-                        <button onclick="window.print()" style="padding: 12px 32px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: ${baseSize}px; font-weight: 700; cursor: pointer; text-transform: uppercase;">
-                            🖨️ CETAK
-                        </button>
-                        <button onclick="window.close()" style="padding: 12px 32px; background: #64748b; color: white; border: none; border-radius: 8px; font-size: ${baseSize}px; font-weight: 700; cursor: pointer; text-transform: uppercase;">
-                            ✖ TUTUP
-                        </button>
-                    </div>
-                </body>
-                </html>
-            `);
-            printWindow.document.close();
-        };
-
-        window.printPDF = () => {
-            const selectedStaff = state.users.find(u => u.ic === state.selectedStaffIc);
-            if (!selectedStaff) return;
-
-            const config = window.elementSdk?.config || defaultConfig;
-            const baseSize = config.font_size || defaultConfig.font_size;
-            
-            const monthRecords = state.attendance.filter(r => {
-                if (r.ic !== state.selectedStaffIc) return false;
-                
-                // Parse DD/MM/YYYY format
-                const normDate = standardizeDate(r.date);
-                const parts = normDate.split('/');
-                if (parts.length !== 3) return false;
-                
-                const recordDay = parseInt(parts[0], 10);
-                const recordMonth = parseInt(parts[1], 10) - 1;
-                const recordYear = parseInt(parts[2], 10);
-                
-                return recordMonth === state.selectedMonth && recordYear === state.selectedYear;
-            }).sort((a, b) => {
-                const partsA = standardizeDate(a.date).split('/');
-                const partsB = standardizeDate(b.date).split('/');
-                const dateA = new Date(parseInt(partsA[2]), parseInt(partsA[1]) - 1, parseInt(partsA[0]));
-                const dateB = new Date(parseInt(partsB[2]), parseInt(partsB[1]) - 1, parseInt(partsB[0]));
-                return dateA - dateB;
-            });
-
-            const daysInMonth = new Date(state.selectedYear, state.selectedMonth + 1, 0).getDate();
-            const dailyRecords = {};
-            
-            for (let day = 1; day <= daysInMonth; day++) {
-                const dayStr = String(day).padStart(2, '0');
-                const monthStr = String(state.selectedMonth + 1).padStart(2, '0');
-                const dateStr = `${dayStr}/${monthStr}/${state.selectedYear}`;
-                
-                const dayRecords = monthRecords.filter(r => standardizeDate(r.date) === dateStr);
-                const clockIn = dayRecords.find(r => r.action === 'masuk');
-                const clockOut = dayRecords.find(r => r.action === 'keluar');
-                const thRecord = dayRecords.find(r => r.action === 'th');
-                const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
-                
-                const testDate = new Date(state.selectedYear, state.selectedMonth, day);
-                const dayOfWeek = testDate.getDay();
-                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
-                
-                let status = '-';
-                let note = '';
-                
-                if (isWeekend) {
-                    status = 'C';
-                    note = 'Cuti Hujung Minggu';
-                } else if (thRecord) {
-                    status = 'Tidak Hadir';
-                    note = thRecord.note || '';
-                } else if (bersebabRecord) {
-                    status = 'Hadir';
-                    note = bersebabRecord.note || '';
-                } else if (clockIn || clockOut) {
-                    status = clockOut && clockIn ? 'Hadir' : 'Masuk sahaja';
-                    note = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '';
-                }
-                
-                dailyRecords[day] = {
-                    date: dateStr,
-                    clockIn: clockIn ? clockIn.time : '-',
-                    clockOut: clockOut ? clockOut.time : '-',
-                    status: status,
-                    note: note
-                };
-            }
-
-            const totalDays = daysInMonth;
-            const weekendDays = Object.values(dailyRecords).filter(r => r.status === 'C').length;
-            const workingDays = totalDays - weekendDays;
-            // Kira 'Hadir' sebagai hadir (termasuk bersebab yang ditukar ke Hadir). Cuti TIDAK dikira sebagai hadir
-            const attendedDays = Object.values(dailyRecords).filter(r => r.status === 'Hadir').length;
-            const attendancePercentage = workingDays > 0 ? Math.round((attendedDays / workingDays) * 100) : 0;
-
-            let tableRows = '';
-            Object.keys(dailyRecords).forEach(day => {
-                const record = dailyRecords[day];
-                tableRows += `
-                    <tr>
-                        <td style="text-align: center; font-weight: 600;">${day}</td>
-                        <td>${record.date}</td>
-                        <td style="text-align: center;">${record.clockIn}</td>
-                        <td style="text-align: center;">${record.clockOut}</td>
-                        <td style="text-align: center;">
-                            <span style="display: inline-block; padding: 4px 10px; background: ${record.status === 'Hadir' ? '#dcfce7' : record.status === 'Masuk sahaja' ? '#fef3c7' : record.status === 'C' ? '#dbeafe' : record.status === 'TH' ? '#fecaca' : record.status === 'Bersebab' ? '#fed7aa' : '#f3f4f6'}; color: ${record.status === 'Hadir' ? '#166534' : record.status === 'Masuk sahaja' ? '#92400e' : record.status === 'C' ? '#1e40af' : record.status === 'TH' ? '#7f1d1d' : record.status === 'Bersebab' ? '#9a3412' : '#6b7280'}; border-radius: 6px; font-size: ${baseSize * 0.75}px; font-weight: 600;">
-                                ${record.status}
-                            </span>
-                            ${record.note ? `<br><small style="color: #64748b; font-style: italic;">${record.note}</small>` : ''}
-                        </td>
-                    </tr>
-                `;
-            });
-            
-            const printWindow = window.open('', '_blank', 'width=1024,height=768');
-            printWindow.document.write(`
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <title>Laporan Bulanan - ${selectedStaff.name}</title>
-                    <style>
-                        body {
-                            font-family: 'Inter', Arial, sans-serif;
-                            margin: 30px;
-                            background: white;
-                            color: #1e293b;
-                            font-size: ${baseSize}px;
-                        }
-                        .header {
-                            text-align: center;
-                            margin-bottom: 30px;
-                        }
-                        .header h1 {
-                            font-size: ${baseSize * 1.5}px;
-                            font-weight: 800;
-                            margin: 0 0 10px 0;
-                        }
-                        .header .staff-name {
-                            font-size: ${baseSize}px;
-                            color: #64748b;
-                            margin-bottom: 4px;
-                            text-transform: uppercase;
-                            font-weight: 700;
-                        }
-                        .header .period {
-                            font-size: ${baseSize * 0.9}px;
-                            color: #64748b;
-                            margin-bottom: 20px;
-                        }
-                        .stats-box {
-                            display: inline-block;
-                            padding: 12px 24px;
-                            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
-                            border-radius: 12px;
-                            border: 2px solid #3b82f6;
-                            margin-bottom: 30px;
-                        }
-                        .stats-label {
-                            font-size: ${baseSize * 0.7}px;
-                            color: #1e40af;
-                            font-weight: 700;
-                            text-transform: uppercase;
-                            letter-spacing: 0.05em;
-                            margin-bottom: 4px;
-                        }
-                        .stats-value {
-                            font-size: ${baseSize * 1.8}px;
-                            font-weight: 800;
-                            color: #1e40af;
-                        }
-                        .stats-details {
-                            font-size: ${baseSize * 0.65}px;
-                            color: #1e40af;
-                            font-weight: 600;
-                            margin-top: 4px;
-                        }
-                        table {
-                            width: 100%;
-                            border-collapse: collapse;
-                        }
-                        th, td {
-                            border: 1px solid #e2e8f0;
-                            padding: 10px 12px;
-                            text-align: left;
-                        }
-                        th {
-                            background: #f8fafc;
-                            font-weight: 700;
-                            font-size: ${baseSize * 0.85}px;
-                            color: #64748b;
-                        }
-                        td {
-                            font-size: ${baseSize * 0.9}px;
-                        }
-                        @media print {
-                            @page {
-                                size: A4;
-                                margin: 15mm;
-                            }
-                            body {
-                                margin: 0;
-                            }
-                        }
-                    </style>
-                </head>
-                <body>
-                    <div class="header">
-                        <h1>LAPORAN KEHADIRAN BULANAN</h1>
-                        <div class="staff-name">${selectedStaff.name.toUpperCase()} (${selectedStaff.ic})</div>
-                        <div class="period">${MONTHS[state.selectedMonth]} ${state.selectedYear}</div>
-                        <div class="stats-box">
-                            <div class="stats-label">Peratus Kehadiran Bulanan</div>
-                            <div class="stats-value">${attendancePercentage}%</div>
-                            <div class="stats-details">${attendedDays} hadir daripada ${workingDays} hari bekerja</div>
-                        </div>
-                    </div>
-                    
-                    <table>
-                        <thead>
-                            <tr>
-                                <th style="text-align: center; width: 60px;">HARI</th>
-                                <th>TARIKH</th>
-                                <th style="text-align: center;">MASUK</th>
-                                <th style="text-align: center;">KELUAR</th>
-                                <th style="text-align: center;">STATUS</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -2106,7 +1954,7 @@
         }
 
         function renderAdmin(config, baseSize, surfaceColor, textColor, primaryColor, secondaryColor) {
-            const selectedIsoDate = state.adminSelectedDate || new Date().toISOString().split('T')[0];
+            const selectedIsoDate = state.adminSelectedDate || getLocalDateStr();
             const parts = selectedIsoDate.split('-');
             const displayDate = `${parts[2]}/${parts[1]}/${parts[0]}`;
             
@@ -2637,6 +2485,7 @@
             if (user) {
                 state.currentUser = user;
                 state.view = String(user.role).toLowerCase() === 'pentadbir' ? 'admin' : 'dashboard';
+                state.adminSelectedDate = getLocalDateStr(); // Tarikh akan dikemaskini tepat secara realtime pada hari ini
                 notify(`Selamat datang ${user.name}!`, 'success');
                 render();
             } else {
@@ -2761,16 +2610,6 @@
             closeDeleteModal();
         };
 
-        window.changeUserCardColor = async (userIc, color) => {
-            if (!window.elementSdk) return;
-            
-            const config = window.elementSdk.config || defaultConfig;
-            const updatedColors = { ...(config.user_card_colors || {}), [userIc]: color };
-            
-            await window.elementSdk.setConfig({ user_card_colors: updatedColors });
-            notify(`Warna kad dikemaskini kepada ${color === 'green' ? 'hijau' : color === 'yellow' ? 'kuning' : 'merah'}!`, 'success');
-        };
-
         window.showEditUserModal = (backendId) => {
             state.editUserModal = backendId;
             render();
@@ -2800,6 +2639,18 @@
         window.changeCardColor = async (backendId, color) => {
             const user = state.users.find(u => u.__backendId === backendId);
             if (user) {
+                user.card_color = color;
+                
+                // Simpan ke local config secara terus supaya memori warna kad sentiasa kekal walaupun skrin di-refresh
+                let localConfig = JSON.parse(localStorage.getItem('debakti_config') || '{}');
+                localConfig.user_card_colors = localConfig.user_card_colors || {};
+                localConfig.user_card_colors[user.ic] = color;
+                localStorage.setItem('debakti_config', JSON.stringify(localConfig));
+                
+                if (window.elementSdk) {
+                    window.elementSdk.config = localConfig;
+                }
+                
                 await updateUserCardColor(user, color);
             }
         };
@@ -3036,5 +2887,6 @@
     </script>
 </body>
 </html>
+
 
 
