@@ -152,6 +152,16 @@
         window.dataSdk = {
             async init(handler) {
                 let data = JSON.parse(localStorage.getItem('debakti_data') || '[]');
+                
+                // Pastikan memori warna kad diterapkan terus dari awal
+                let localConfig = JSON.parse(localStorage.getItem('debakti_config') || '{}');
+                let userColors = localConfig.user_card_colors || {};
+                data.forEach(r => {
+                    if (r.type === 'user' && userColors[r.ic]) {
+                        r.card_color = userColors[r.ic];
+                    }
+                });
+                
                 handler.onDataChanged(data);
                 
                 try {
@@ -186,7 +196,21 @@
                                             }
                                         });
 
-                                        // Fallback yang teguh jika google sheet tidak detect label header
+                                        // Carian bijak Lajur (Robust Fallback)
+                                        const getColVal = (keywords, fallbackIdx) => {
+                                            const key = cols.find(c => keywords.some(kw => c.includes(kw)));
+                                            let val = '';
+                                            if (key) {
+                                                val = flatRow[key + '_f'] || flatRow[key] || '';
+                                            }
+                                            if (!val) {
+                                                if (r.c && r.c[fallbackIdx] && r.c[fallbackIdx].v !== null && r.c[fallbackIdx].v !== undefined) {
+                                                    val = (r.c[fallbackIdx].f) ? String(r.c[fallbackIdx].f) : String(r.c[fallbackIdx].v);
+                                                }
+                                            }
+                                            return String(val).trim();
+                                        };
+                                        
                                         const getCell = (idx) => {
                                             if (r.c && r.c[idx] && r.c[idx].v !== null && r.c[idx].v !== undefined) {
                                                 if (Array.isArray(r.c[idx].v) && r.c[idx].v.length >= 2) {
@@ -196,7 +220,6 @@
                                             }
                                             return '';
                                         };
-                                        const getCellF = (idx) => (r.c && r.c[idx] && r.c[idx].f !== null && r.c[idx].f !== undefined) ? String(r.c[idx].f) : getCell(idx);
                                         
                                         let backendId = String(flatRow['backendid'] || getCell(0) || Math.random().toString());
                                         let jenis = String(flatRow['jenis'] || getCell(1)).toLowerCase().trim();
@@ -205,10 +228,10 @@
                                         
                                         let nama = String(flatRow['nama'] || getCell(2)).trim();
                                         let jawatanSyif = String(flatRow['jawatansyif'] || flatRow['jawatan'] || flatRow['role'] || getCell(9));
-                                        let tarikh = standardizeDate(String(flatRow['tarikh_f'] || flatRow['tarikh'] || getCellF(4)).trim());
+                                        let tarikh = standardizeDate(getColVal(['tarikh', 'date'], 4));
                                         
-                                        let mMasukRaw = String(flatRow['masamasuk_f'] || flatRow['masamasuk'] || getCellF(5)).trim();
-                                        let mKeluarRaw = String(flatRow['masakeluar_f'] || flatRow['masakeluar'] || getCellF(6)).trim();
+                                        let mMasukRaw = getColVal(['masamasuk', 'timein', 'masuk'], 5);
+                                        let mKeluarRaw = getColVal(['masakeluar', 'timeout', 'keluar'], 6);
                                         
                                         const formatTime = (t) => {
                                             if(!t || t === '-' || t === 'null') return '-';
@@ -228,6 +251,13 @@
                                                         return String(h).padStart(2,'0') + ':' + (m || '00');
                                                     }
                                                 }
+                                            }
+                                            // Handle pecahan Google Sheet (contoh 0.5 = 12:00)
+                                            if (!isNaN(parseFloat(t)) && parseFloat(t) > 0 && parseFloat(t) < 1 && t.includes('.')) {
+                                                let totalMins = Math.round(parseFloat(t) * 24 * 60);
+                                                let h = Math.floor(totalMins / 60);
+                                                let m = totalMins % 60;
+                                                return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
                                             }
                                             if (t.includes(',')) {
                                                 let parts = t.split(',');
@@ -347,10 +377,21 @@
                                     const localData = JSON.parse(localStorage.getItem('debakti_data') || '[]');
                                     const deletedIds = JSON.parse(localStorage.getItem('debakti_deleted') || '[]');
                                     
+                                    // Panggil warna kad dari Config memori secara terus
+                                    let savedConfig = JSON.parse(localStorage.getItem('debakti_config') || '{}');
+                                    let savedUserColors = savedConfig.user_card_colors || {};
+                                    
                                     let finalData = parsedData.map(remoteRec => {
+                                        if (remoteRec.type === 'user' && savedUserColors[remoteRec.ic]) {
+                                            remoteRec.card_color = savedUserColors[remoteRec.ic];
+                                        }
+                                        
                                         const localRec = localData.find(l => l.__backendId === remoteRec.__backendId);
                                         // Kekalkan rekod local jika ia baru diubah kurang 5 minit
                                         if (localRec && localRec._localUpdatedAt && (Date.now() - localRec._localUpdatedAt < 5 * 60 * 1000)) {
+                                            if (localRec.type === 'user' && savedUserColors[localRec.ic]) {
+                                                localRec.card_color = savedUserColors[localRec.ic];
+                                            }
                                             return localRec;
                                         }
                                         return remoteRec;
@@ -402,27 +443,18 @@
                         formData.append('tarikh', record.date || '-');
                         
                         const normRecordDate = standardizeDate(record.date);
-                        const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
-                        const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                        // Ambil record yang terakhir/terkini sahaja
+                        const allIn = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
+                        const existingIn = allIn[allIn.length - 1];
+                        const allOut = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                        const existingOut = allOut[allOut.length - 1];
                         
                         let masaMasuk = existingIn ? existingIn.time : (record.action === 'masuk' ? record.time : '-');
                         let masaKeluar = existingOut ? existingOut.time : (record.action === 'keluar' ? record.time : '-');
                         
-                        let finalTindakan = record.action;
-                        if (masaMasuk !== '-' && masaKeluar !== '-') {
-                            finalTindakan = 'Selesai';
-                        } else if (masaMasuk !== '-') {
-                            finalTindakan = 'Masuk';
-                        } else if (masaKeluar !== '-') {
-                            finalTindakan = 'Keluar';
-                        }
-                        
-                        if (record.action === 'th') finalTindakan = 'Tidak Hadir';
-                        if (record.action === 'bersebab') finalTindakan = 'Bersebab';
-                        
                         formData.append('masa_masuk', masaMasuk);
                         formData.append('masa_keluar', masaKeluar);
-                        formData.append('tindakan', finalTindakan);
+                        formData.append('tindakan', record.action); // Menghantar tindakan tulen supaya GS merekod dgn tepat
                         
                         let allNotes = [];
                         const allToday = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.note && r.note !== '-');
@@ -466,12 +498,8 @@
                         
                         formData.append('method', 'update'); 
                         
+                        // Menghantar Id Original Sepenuhnya
                         let rawId = record.__backendId;
-                        if(rawId.includes('_in')) rawId = rawId.replace('_in', '');
-                        else if(rawId.includes('_out')) rawId = rawId.replace('_out', '');
-                        else if(rawId.includes('_th')) rawId = rawId.replace('_th', '');
-                        else if(rawId.includes('_bersebab')) rawId = rawId.replace('_bersebab', '');
-                        else if(rawId.includes('_usr')) rawId = rawId.replace('_usr', '');
                         
                         formData.append('backendId', rawId);
                         formData.append('type', record.type);
@@ -482,27 +510,17 @@
                             formData.append('tarikh', record.date || '-');
                             
                             const normRecordDate = standardizeDate(record.date);
-                            const existingIn = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
-                            const existingOut = data.find(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                            const allIn = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'masuk');
+                            const existingIn = allIn[allIn.length - 1];
+                            const allOut = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.action === 'keluar');
+                            const existingOut = allOut[allOut.length - 1];
                             
                             let masaMasuk = existingIn ? existingIn.time : (record.action === 'masuk' ? record.time : '-');
                             let masaKeluar = existingOut ? existingOut.time : (record.action === 'keluar' ? record.time : '-');
                             
-                            let finalTindakan = record.action;
-                            if (masaMasuk !== '-' && masaKeluar !== '-') {
-                                finalTindakan = 'Selesai';
-                            } else if (masaMasuk !== '-') {
-                                finalTindakan = 'Masuk';
-                            } else if (masaKeluar !== '-') {
-                                finalTindakan = 'Keluar';
-                            }
-                            
-                            if (record.action === 'th') finalTindakan = 'Tidak Hadir';
-                            if (record.action === 'bersebab') finalTindakan = 'Bersebab';
-                            
                             formData.append('masa_masuk', masaMasuk);
                             formData.append('masa_keluar', masaKeluar);
-                            formData.append('tindakan', finalTindakan);
+                            formData.append('tindakan', record.action); // Menghantar tindakan tulen supaya GS merekod dgn tepat
                             
                             let allNotes = [];
                             const allToday = data.filter(r => String(r.ic).trim() === String(record.ic).trim() && standardizeDate(r.date) === normRecordDate && r.note && r.note !== '-');
@@ -943,8 +961,10 @@
             let tableRows = '';
             staff.sort((a,b) => a.name.localeCompare(b.name)).forEach(u => {
                 const dayRecords = state.attendance.filter(a => a.ic === u.ic && standardizeDate(a.date) === printDate);
-                const clockIn = dayRecords.find(r => r.action === 'masuk');
-                const clockOut = dayRecords.find(r => r.action === 'keluar');
+                const inRecords = dayRecords.filter(r => r.action === 'masuk');
+                const outRecords = dayRecords.filter(r => r.action === 'keluar');
+                const clockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+                const clockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
                 const thRecord = dayRecords.find(r => r.action === 'th');
                 const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
                 
@@ -1105,6 +1125,243 @@
                                 <th style="text-align: center;">MASA</th>
                                 <th style="text-align: center;">STATUS</th>
                                 <th style="text-align: left;">CATATAN</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${tableRows}
+                        </tbody>
+                    </table>
+                    
+                    <div class="print-button" style="margin-top: 30px; text-align: center; display: flex; gap: 16px; justify-content: center;">
+                        <button onclick="window.print()" style="padding: 12px 32px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: ${baseSize}px; font-weight: 700; cursor: pointer; text-transform: uppercase;">
+                            🖨️ CETAK
+                        </button>
+                        <button onclick="window.close()" style="padding: 12px 32px; background: #64748b; color: white; border: none; border-radius: 8px; font-size: ${baseSize}px; font-weight: 700; cursor: pointer; text-transform: uppercase;">
+                            ✖ TUTUP
+                        </button>
+                    </div>
+                </body>
+                </html>
+            `);
+            printWindow.document.close();
+        };
+
+        window.printPDF = () => {
+            const selectedStaff = state.users.find(u => u.ic === state.selectedStaffIc);
+            if (!selectedStaff) return;
+
+            const config = window.elementSdk?.config || defaultConfig;
+            const baseSize = config.font_size || defaultConfig.font_size;
+            
+            const monthRecords = state.attendance.filter(r => {
+                if (r.ic !== state.selectedStaffIc) return false;
+                
+                // Parse DD/MM/YYYY format
+                const normDate = standardizeDate(r.date);
+                const parts = normDate.split('/');
+                if (parts.length !== 3) return false;
+                
+                const recordDay = parseInt(parts[0], 10);
+                const recordMonth = parseInt(parts[1], 10) - 1;
+                const recordYear = parseInt(parts[2], 10);
+                
+                return recordMonth === state.selectedMonth && recordYear === state.selectedYear;
+            }).sort((a, b) => {
+                const partsA = standardizeDate(a.date).split('/');
+                const partsB = standardizeDate(b.date).split('/');
+                const dateA = new Date(parseInt(partsA[2]), parseInt(partsA[1]) - 1, parseInt(partsA[0]));
+                const dateB = new Date(parseInt(partsB[2]), parseInt(partsB[1]) - 1, parseInt(partsB[0]));
+                return dateA - dateB;
+            });
+
+            const daysInMonth = new Date(state.selectedYear, state.selectedMonth + 1, 0).getDate();
+            const dailyRecords = {};
+            
+            for (let day = 1; day <= daysInMonth; day++) {
+                const dayStr = String(day).padStart(2, '0');
+                const monthStr = String(state.selectedMonth + 1).padStart(2, '0');
+                const dateStr = `${dayStr}/${monthStr}/${state.selectedYear}`;
+                
+                const dayRecords = monthRecords.filter(r => standardizeDate(r.date) === dateStr);
+                const inRecords = dayRecords.filter(r => r.action === 'masuk');
+                const outRecords = dayRecords.filter(r => r.action === 'keluar');
+                const clockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+                const clockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
+                const thRecord = dayRecords.find(r => r.action === 'th');
+                const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
+                
+                const testDate = new Date(state.selectedYear, state.selectedMonth, day);
+                const dayOfWeek = testDate.getDay();
+                const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
+                
+                let status = '-';
+                let note = '';
+                
+                if (isWeekend) {
+                    status = 'C';
+                    note = 'Cuti Hujung Minggu';
+                } else if (thRecord) {
+                    status = 'Tidak Hadir';
+                    note = thRecord.note || '';
+                } else if (bersebabRecord) {
+                    const noteContent = (bersebabRecord.note || '').toUpperCase();
+                    if (noteContent.includes('CUTI') || noteContent.includes('CRK') || noteContent.includes('CTR') || noteContent.includes('MC')) {
+                        status = 'Tidak Hadir';
+                    } else {
+                        status = 'Hadir';
+                    }
+                    note = bersebabRecord.note || '';
+                } else if (clockIn || clockOut) {
+                    status = clockOut && clockIn ? 'Hadir' : 'Masuk sahaja';
+                    note = (clockIn && clockIn.note) || (clockOut && clockOut.note) || '';
+                }
+                
+                dailyRecords[day] = {
+                    date: dateStr,
+                    clockIn: clockIn ? clockIn.time : '-',
+                    clockOut: clockOut ? clockOut.time : '-',
+                    status: status,
+                    note: note
+                };
+            }
+
+            const totalDays = daysInMonth;
+            const weekendDays = Object.values(dailyRecords).filter(r => r.status === 'C').length;
+            const workingDays = totalDays - weekendDays;
+            // Kira 'Hadir' sebagai hadir (termasuk bersebab yang ditukar ke Hadir). Cuti TIDAK dikira sebagai hadir
+            const attendedDays = Object.values(dailyRecords).filter(r => r.status === 'Hadir').length;
+            const attendancePercentage = workingDays > 0 ? Math.round((attendedDays / workingDays) * 100) : 0;
+
+            let tableRows = '';
+            Object.keys(dailyRecords).forEach(day => {
+                const record = dailyRecords[day];
+                tableRows += `
+                    <tr>
+                        <td style="text-align: center; font-weight: 600;">${day}</td>
+                        <td>${record.date}</td>
+                        <td style="text-align: center;">${record.clockIn}</td>
+                        <td style="text-align: center;">${record.clockOut}</td>
+                        <td style="text-align: center;">
+                            <span style="display: inline-block; padding: 4px 10px; background: ${record.status === 'Hadir' ? '#dcfce7' : record.status === 'Masuk sahaja' ? '#fef3c7' : record.status === 'C' ? '#dbeafe' : record.status === 'TH' ? '#fecaca' : record.status === 'Bersebab' ? '#fed7aa' : '#f3f4f6'}; color: ${record.status === 'Hadir' ? '#166534' : record.status === 'Masuk sahaja' ? '#92400e' : record.status === 'C' ? '#1e40af' : record.status === 'TH' ? '#7f1d1d' : record.status === 'Bersebab' ? '#9a3412' : '#6b7280'}; border-radius: 6px; font-size: ${baseSize * 0.75}px; font-weight: 600;">
+                                ${record.status}
+                            </span>
+                            ${record.note ? `<br><small style="color: #64748b; font-style: italic;">${record.note}</small>` : ''}
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            const printWindow = window.open('', '_blank', 'width=1024,height=768');
+            printWindow.document.write(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Laporan Bulanan - ${selectedStaff.name}</title>
+                    <style>
+                        body {
+                            font-family: 'Inter', Arial, sans-serif;
+                            margin: 30px;
+                            background: white;
+                            color: #1e293b;
+                            font-size: ${baseSize}px;
+                        }
+                        .header {
+                            text-align: center;
+                            margin-bottom: 30px;
+                        }
+                        .header h1 {
+                            font-size: ${baseSize * 1.5}px;
+                            font-weight: 800;
+                            margin: 0 0 10px 0;
+                        }
+                        .header .staff-name {
+                            font-size: ${baseSize}px;
+                            color: #64748b;
+                            margin-bottom: 4px;
+                            text-transform: uppercase;
+                            font-weight: 700;
+                        }
+                        .header .period {
+                            font-size: ${baseSize * 0.9}px;
+                            color: #64748b;
+                            margin-bottom: 20px;
+                        }
+                        .stats-box {
+                            display: inline-block;
+                            padding: 12px 24px;
+                            background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+                            border-radius: 12px;
+                            border: 2px solid #3b82f6;
+                            margin-bottom: 30px;
+                        }
+                        .stats-label {
+                            font-size: ${baseSize * 0.7}px;
+                            color: #1e40af;
+                            font-weight: 700;
+                            text-transform: uppercase;
+                            letter-spacing: 0.05em;
+                            margin-bottom: 4px;
+                        }
+                        .stats-value {
+                            font-size: ${baseSize * 1.8}px;
+                            font-weight: 800;
+                            color: #1e40af;
+                        }
+                        .stats-details {
+                            font-size: ${baseSize * 0.65}px;
+                            color: #1e40af;
+                            font-weight: 600;
+                            margin-top: 4px;
+                        }
+                        table {
+                            width: 100%;
+                            border-collapse: collapse;
+                        }
+                        th, td {
+                            border: 1px solid #e2e8f0;
+                            padding: 10px 12px;
+                            text-align: left;
+                        }
+                        th {
+                            background: #f8fafc;
+                            font-weight: 700;
+                            font-size: ${baseSize * 0.85}px;
+                            color: #64748b;
+                        }
+                        td {
+                            font-size: ${baseSize * 0.9}px;
+                        }
+                        @media print {
+                            @page {
+                                size: A4;
+                                margin: 15mm;
+                            }
+                            body {
+                                margin: 0;
+                            }
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="header">
+                        <h1>LAPORAN KEHADIRAN BULANAN</h1>
+                        <div class="staff-name">${selectedStaff.name.toUpperCase()} (${selectedStaff.ic})</div>
+                        <div class="period">${MONTHS[state.selectedMonth]} ${state.selectedYear}</div>
+                        <div class="stats-box">
+                            <div class="stats-label">Peratus Kehadiran Bulanan</div>
+                            <div class="stats-value">${attendancePercentage}%</div>
+                            <div class="stats-details">${attendedDays} hadir daripada ${workingDays} hari bekerja</div>
+                        </div>
+                    </div>
+                    
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="text-align: center; width: 60px;">HARI</th>
+                                <th>TARIKH</th>
+                                <th style="text-align: center;">MASUK</th>
+                                <th style="text-align: center;">KELUAR</th>
+                                <th style="text-align: center;">STATUS</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -1798,8 +2055,10 @@
                 standardizeDate(r.date) === today
             );
 
-            const lastClockIn = todayRecords.filter(r => r.action === 'masuk').sort((a, b) => b.timestamp - a.timestamp)[0];
-            const lastClockOut = todayRecords.filter(r => r.action === 'keluar').sort((a, b) => b.timestamp - a.timestamp)[0];
+            const inRecords = todayRecords.filter(r => r.action === 'masuk');
+            const outRecords = todayRecords.filter(r => r.action === 'keluar');
+            const lastClockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+            const lastClockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
             
             const isPunchIn = lastClockIn && !lastClockOut;
             const isCompleted = lastClockIn && lastClockOut;
@@ -1845,7 +2104,7 @@
                                         Punch In Hari Ini
                                     </div>
                                     <div style="font-size: ${baseSize * 2.5}px; font-weight: 800; color: ${isPunchIn || isCompleted ? '#10b981' : textColor};">
-                                        ${lastClockIn ? lastClockIn.time : '--:--'}
+                                        ${lastClockIn && lastClockIn.time !== '-' ? lastClockIn.time : '--:--'}
                                     </div>
                                     ${lastClockIn && lastClockIn.note ? `<div style="font-size: ${baseSize * 0.75}px; color: #f97316; font-weight: 600; font-style: italic; margin-top: 4px;">${lastClockIn.note}</div>` : ''}
                                 </div>
@@ -1855,7 +2114,7 @@
                                         Punch Out Hari Ini
                                     </div>
                                     <div style="font-size: ${baseSize * 2.5}px; font-weight: 800; color: ${isCompleted ? '#10b981' : textColor};">
-                                        ${lastClockOut ? lastClockOut.time : '--:--'}
+                                        ${lastClockOut && lastClockOut.time !== '-' ? lastClockOut.time : '--:--'}
                                     </div>
                                     ${lastClockOut && lastClockOut.note ? `<div style="font-size: ${baseSize * 0.75}px; color: #f97316; font-weight: 600; font-style: italic; margin-top: 4px;">${lastClockOut.note}</div>` : ''}
                                 </div>
@@ -2175,8 +2434,10 @@
                                         <tbody>
                                             ${staff.sort((a,b) => a.name.localeCompare(b.name)).map(u => {
                                                 const dayRecords = state.attendance.filter(a => a.ic === u.ic && standardizeDate(a.date) === displayDate);
-                                                const clockIn = dayRecords.find(r => r.action === 'masuk');
-                                                const clockOut = dayRecords.find(r => r.action === 'keluar');
+                                                const inRecords = dayRecords.filter(r => r.action === 'masuk');
+                                                const outRecords = dayRecords.filter(r => r.action === 'keluar');
+                                                const clockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+                                                const clockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
                                                 const thRecord = dayRecords.find(r => r.action === 'th');
                                                 const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
                                                 
@@ -2294,8 +2555,10 @@
                 const dateStr = `${dayStr}/${monthStr}/${state.selectedYear}`;
                 
                 const dayRecords = monthRecords.filter(r => standardizeDate(r.date) === dateStr);
-                const clockIn = dayRecords.find(r => r.action === 'masuk');
-                const clockOut = dayRecords.find(r => r.action === 'keluar');
+                const inRecords = dayRecords.filter(r => r.action === 'masuk');
+                const outRecords = dayRecords.filter(r => r.action === 'keluar');
+                const clockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+                const clockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
                 const thRecord = dayRecords.find(r => r.action === 'th');
                 const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
                 
@@ -2696,8 +2959,10 @@
             if (!user) return;
             
             const dayRecords = state.attendance.filter(a => a.ic === userIc && standardizeDate(a.date) === dateStr);
-            const clockIn = dayRecords.find(r => r.action === 'masuk');
-            const clockOut = dayRecords.find(r => r.action === 'keluar');
+            const inRecords = dayRecords.filter(r => r.action === 'masuk');
+            const outRecords = dayRecords.filter(r => r.action === 'keluar');
+            const clockIn = inRecords.length > 0 ? inRecords[inRecords.length - 1] : undefined;
+            const clockOut = outRecords.length > 0 ? outRecords[outRecords.length - 1] : undefined;
             const thRecord = dayRecords.find(r => r.action === 'th');
             const bersebabRecord = dayRecords.find(r => r.action === 'bersebab');
             
@@ -2715,7 +2980,7 @@
                 recordToEdit = bersebabRecord;
             } else if (clockIn) {
                 currentStatus = 'HADIR';
-                currentNote = clockIn.note || clockOut?.note || '';
+                currentNote = clockIn.note || (clockOut && clockOut.note) || '';
                 recordToEdit = clockIn;
             }
             
